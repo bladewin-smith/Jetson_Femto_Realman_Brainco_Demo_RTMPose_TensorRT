@@ -1,0 +1,24 @@
+{
+  "arm_axis_deadband_m": [
+    0.006,
+    0.006,
+    0.006
+  ],
+  "arm_command_interval_s": 0.5,
+  "arm_mit_control_enabled": true,
+  "arm_mit_kd": 28.200000000000003,
+  "arm_mit_kp": 69.0,
+  "arm_mit_max_accel_m_s2": 0.7000000000000001,
+  "arm_mit_max_velocity_m_s": 0.70,
+  "hand_bend_deadzone": 0.18,
+  "hand_bend_max_delta": 0.35000000000000003,
+  "hand_bend_smoothing": 0.25,
+  "hand_deadband": 1,
+  "hand_deadband_m": 0.005,
+  "hand_send_hz": 40.0,
+  "hand_smoothing": 0.9,
+  "max_arm_target_delta_m": 0.003,
+  "palm_filter_alpha": 0.55,
+  "palm_filter_hold_deadband_m": 0.01,
+  "palm_filter_release_deadband_m": 0.018000000000000002
+}

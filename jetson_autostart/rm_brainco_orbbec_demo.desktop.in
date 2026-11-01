@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=RM BrainCo Orbbec Demo
+Comment=Start RM65-B + BrainCo Revo2 + Orbbec visual following demo with GUI
+Exec=/usr/local/bin/rm_brainco_orbbec_demo
+Terminal=false
+X-GNOME-Autostart-enabled=true
+StartupNotify=false

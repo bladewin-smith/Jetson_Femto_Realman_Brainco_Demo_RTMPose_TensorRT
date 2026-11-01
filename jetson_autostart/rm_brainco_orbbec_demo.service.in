@@ -1,0 +1,24 @@
+[Unit]
+Description=RM65-B + BrainCo Revo2 + Orbbec Femto Mega visual following demo
+Wants=network-online.target systemd-udev-settle.service
+After=network-online.target systemd-udev-settle.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+Group=__SERVICE_USER__
+SupplementaryGroups=dialout video plugdev
+EnvironmentFile=/etc/rm_brainco_orbbec_demo/rm_brainco_orbbec_demo.env
+WorkingDirectory=__APP_ROOT__
+ExecStart=/usr/local/bin/rm_brainco_orbbec_demo
+Restart=on-failure
+RestartSec=3
+KillSignal=SIGINT
+TimeoutStopSec=12
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

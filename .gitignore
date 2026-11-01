@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.log
+Log/
+build/
+dist/
+.pytest_cache/
+
+# Generated/downloaded deployment artifacts are platform-specific and large.
+models/mmdeploy/*/
+*.engine
+*.onnx
+*.pth
+*.pt
