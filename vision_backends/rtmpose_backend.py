@@ -1,9 +1,8 @@
 """RTMDet + RTMPose body + dedicated RTMPose hand inference.
 
-The production path uses MMDeploy SDK models backed by TensorRT.  A PyTorch
-path is kept for desktop/reference validation.  Imports are intentionally lazy
-so the geometry and depth-selection helpers can be tested without CUDA or
-OpenMMLab installed.
+The production path uses native TensorRT 10 engines. MMDeploy and PyTorch
+remain available as compatibility/reference backends. Imports are lazy so
+geometry and depth-selection helpers can be tested without CUDA installed.
 """
 
 from __future__ import annotations
@@ -16,6 +15,8 @@ from typing import Any, Iterable
 
 import cv2
 import numpy as np
+
+from .tensorrt_runtime import TensorRTRuntime
 
 
 COCO_17_LANDMARKS = {
@@ -211,10 +212,13 @@ class RTMPoseLandmarkDetector:
 
     def __init__(
         self,
-        runtime: str = "mmdeploy",
+        runtime: str = "tensorrt",
         detector_model_dir: str = "",
         body_model_dir: str = "",
         hand_model_dir: str = "",
+        detector_engine_path: str = "",
+        body_engine_path: str = "",
+        hand_engine_path: str = "",
         device_name: str = "cuda",
         device_id: int = 0,
         detector_config: str = "",
@@ -224,6 +228,10 @@ class RTMPoseLandmarkDetector:
         hand_config: str = "",
         hand_checkpoint: str = "",
         person_score_threshold: float = 0.45,
+        detector_decode_score_threshold: float = 0.05,
+        detector_nms_iou_threshold: float = 0.6,
+        detector_max_detections: int = 100,
+        pose_bbox_padding: float = 1.25,
         body_keypoint_threshold: float = 0.35,
         hand_keypoint_threshold: float = 0.25,
         hand_roi_scale: float = 2.25,
@@ -240,6 +248,18 @@ class RTMPoseLandmarkDetector:
         if runtime_impl is not None:
             self.runtime = runtime_impl
             self.runtime_name = "injected"
+        elif self.runtime_name in ("tensorrt", "trt"):
+            self.runtime = TensorRTRuntime(
+                detector_engine=detector_engine_path or detector_model_dir,
+                body_engine=body_engine_path or body_model_dir,
+                hand_engine=hand_engine_path or hand_model_dir,
+                device_id=device_id,
+                detector_score_threshold=detector_decode_score_threshold,
+                detector_nms_iou_threshold=detector_nms_iou_threshold,
+                detector_max_detections=detector_max_detections,
+                pose_bbox_padding=pose_bbox_padding,
+                logger=logger,
+            )
         elif self.runtime_name == "mmdeploy":
             self.runtime = _MMDeployRuntime(
                 detector_model_dir,
@@ -260,7 +280,7 @@ class RTMPoseLandmarkDetector:
                 torch_device,
             )
         else:
-            raise ValueError("rtmpose_runtime must be 'mmdeploy' or 'pytorch'")
+            raise ValueError("rtmpose_runtime must be 'tensorrt', 'mmdeploy' or 'pytorch'")
 
         self.person_score_threshold = max(0.0, min(1.0, float(person_score_threshold)))
         self.body_keypoint_threshold = max(0.0, min(1.0, float(body_keypoint_threshold)))

@@ -5707,7 +5707,7 @@ class HandPalmRm65ControlNode(Node):
             self.declare_parameter("vision_backend", "rtmpose").value
         ).strip().lower()
         rtmpose_runtime = str(
-            self.declare_parameter("rtmpose_runtime", "mmdeploy").value
+            self.declare_parameter("rtmpose_runtime", "tensorrt").value
         ).strip().lower()
         rtmpose_device_name = str(
             self.declare_parameter("rtmpose_device_name", "cuda").value
@@ -5715,6 +5715,24 @@ class HandPalmRm65ControlNode(Node):
         rtmpose_device_id = int(
             self.declare_parameter("rtmpose_device_id", 0).value
         )
+        default_engine_root = _REPOSITORY_ROOT / "models" / "tensorrt"
+        rtmdet_engine_path = str(
+            self.declare_parameter(
+                "rtmdet_engine_path", str(default_engine_root / "rtmdet_nano.engine")
+            ).value
+        ).strip()
+        rtmpose_body_engine_path = str(
+            self.declare_parameter(
+                "rtmpose_body_engine_path",
+                str(default_engine_root / "rtmpose_body.engine"),
+            ).value
+        ).strip()
+        rtmpose_hand_engine_path = str(
+            self.declare_parameter(
+                "rtmpose_hand_engine_path",
+                str(default_engine_root / "rtmpose_hand.engine"),
+            ).value
+        ).strip()
         default_model_root = _REPOSITORY_ROOT / "models" / "mmdeploy"
         rtmdet_model_dir = str(
             self.declare_parameter(
@@ -5749,6 +5767,18 @@ class HandPalmRm65ControlNode(Node):
         ).strip()
         rtmpose_person_score_threshold = float(
             self.declare_parameter("rtmpose_person_score_threshold", 0.45).value
+        )
+        rtmdet_decode_score_threshold = float(
+            self.declare_parameter("rtmdet_decode_score_threshold", 0.05).value
+        )
+        rtmdet_nms_iou_threshold = float(
+            self.declare_parameter("rtmdet_nms_iou_threshold", 0.60).value
+        )
+        rtmdet_max_detections = int(
+            self.declare_parameter("rtmdet_max_detections", 100).value
+        )
+        rtmpose_bbox_padding = float(
+            self.declare_parameter("rtmpose_bbox_padding", 1.25).value
         )
         rtmpose_body_keypoint_threshold = float(
             self.declare_parameter("rtmpose_body_keypoint_threshold", 0.35).value
@@ -5995,6 +6025,9 @@ class HandPalmRm65ControlNode(Node):
                 detector_model_dir=rtmdet_model_dir,
                 body_model_dir=rtmpose_body_model_dir,
                 hand_model_dir=rtmpose_hand_model_dir,
+                detector_engine_path=rtmdet_engine_path,
+                body_engine_path=rtmpose_body_engine_path,
+                hand_engine_path=rtmpose_hand_engine_path,
                 device_name=rtmpose_device_name,
                 device_id=rtmpose_device_id,
                 detector_config=rtmdet_config,
@@ -6004,6 +6037,10 @@ class HandPalmRm65ControlNode(Node):
                 hand_config=rtmpose_hand_config,
                 hand_checkpoint=rtmpose_hand_checkpoint,
                 person_score_threshold=rtmpose_person_score_threshold,
+                detector_decode_score_threshold=rtmdet_decode_score_threshold,
+                detector_nms_iou_threshold=rtmdet_nms_iou_threshold,
+                detector_max_detections=rtmdet_max_detections,
+                pose_bbox_padding=rtmpose_bbox_padding,
                 body_keypoint_threshold=rtmpose_body_keypoint_threshold,
                 hand_keypoint_threshold=rtmpose_hand_keypoint_threshold,
                 hand_roi_scale=rtmpose_hand_roi_scale,

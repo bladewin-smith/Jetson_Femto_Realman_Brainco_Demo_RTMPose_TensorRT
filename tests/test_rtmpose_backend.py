@@ -7,6 +7,12 @@ from vision_backends.rtmpose_backend import (
     RTMDetDepthPersonSelector,
     RTMPoseLandmarkDetector,
 )
+from vision_backends.tensorrt_runtime import (
+    TensorRTRuntime,
+    _decode_simcc,
+    _nms,
+    _prepare_pose_input,
+)
 
 
 class FakeRuntime:
@@ -123,6 +129,47 @@ class RTMPoseBackendTests(unittest.TestCase):
                 color_image=color,
             )
         )
+
+
+class TensorRTRuntimeMathTests(unittest.TestCase):
+    def test_nms_suppresses_overlapping_box(self):
+        boxes = np.asarray(
+            [[0, 0, 100, 100], [5, 5, 95, 95], [150, 150, 200, 200]],
+            np.float32,
+        )
+        scores = np.asarray([0.9, 0.8, 0.7], np.float32)
+        kept = _nms(boxes, scores, 0.5, 100)
+        np.testing.assert_array_equal(kept, np.asarray([0, 2]))
+
+    def test_simcc_decode_uses_axis_argmax_and_lower_score(self):
+        simcc_x = np.full((1, 2, 8), -2.0, np.float32)
+        simcc_y = np.full((1, 2, 10), -2.0, np.float32)
+        simcc_x[0, 0, 3] = 0.8
+        simcc_y[0, 0, 7] = 0.6
+        simcc_x[0, 1, 4] = 0.5
+        simcc_y[0, 1, 2] = 0.9
+        coordinates, scores = _decode_simcc(simcc_x, simcc_y)
+        np.testing.assert_array_equal(coordinates[0], [[3, 7], [4, 2]])
+        np.testing.assert_allclose(scores[0], [0.6, 0.5])
+
+    def test_pose_preprocess_keeps_fixed_nchw_shape(self):
+        image = np.zeros((300, 500, 3), np.uint8)
+        tensor, center, scale = _prepare_pose_input(
+            image, (50, 40, 450, 280), (192, 256), 1.25
+        )
+        self.assertEqual(tensor.shape, (1, 3, 256, 192))
+        np.testing.assert_allclose(center, [250, 160])
+        self.assertAlmostEqual(float(scale[0] / scale[1]), 192.0 / 256.0)
+
+    def test_raw_rtmdet_outputs_are_decoded_without_plugins(self):
+        boxes = np.asarray([[[1, 2, 3, 4], [5, 6, 7, 8]]], np.float32)
+        class_scores = np.asarray([[[0.1, 0.9], [0.8, 0.2]]], np.float32)
+        decoded_boxes, scores, labels = TensorRTRuntime._decode_detector_outputs(
+            {"boxes": boxes, "scores": class_scores}
+        )
+        np.testing.assert_array_equal(decoded_boxes, boxes[0])
+        np.testing.assert_allclose(scores, [0.9, 0.8])
+        np.testing.assert_array_equal(labels, [1, 0])
 
 
 if __name__ == "__main__":
