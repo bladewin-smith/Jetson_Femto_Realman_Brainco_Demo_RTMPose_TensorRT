@@ -18,6 +18,7 @@ from vision_backends.tensorrt_runtime import (
 class FakeRuntime:
     def __init__(self):
         self.pose_calls = []
+        self.hand_scores = np.full(21, 0.9, np.float32)
 
     def detect(self, _image):
         return (
@@ -40,7 +41,7 @@ class FakeRuntime:
         hand = np.zeros((21, 3), np.float32)
         hand[:, 0] = np.arange(21) + float(bboxes[0, 0])
         hand[:, 1] = np.arange(21) + float(bboxes[0, 1])
-        hand[:, 2] = 0.9
+        hand[:, 2] = self.hand_scores
         return hand[None, ...]
 
     def close(self):
@@ -106,6 +107,25 @@ class RTMPoseBackendTests(unittest.TestCase):
         calls_after_first = len(self.runtime.pose_calls)
         self.backend.collect(self.image, person_bbox=(10, 20, 210, 380))
         self.assertEqual(len(self.runtime.pose_calls), calls_after_first + 1)
+
+    def test_low_confidence_hand_keypoint_is_held_for_two_inference_frames(self):
+        backend = RTMPoseLandmarkDetector(
+            runtime_impl=self.runtime,
+            body_keypoint_threshold=0.35,
+            hand_keypoint_threshold=0.5,
+            hand_inference_interval=1,
+            hand_keypoint_hold_frames=2,
+        )
+        first = backend.collect(self.image, person_bbox=(10, 20, 210, 380))
+        self.assertIn("right_8", first)
+        self.runtime.hand_scores[8] = 0.1
+        second = backend.collect(self.image, person_bbox=(10, 20, 210, 380))
+        third = backend.collect(self.image, person_bbox=(10, 20, 210, 380))
+        fourth = backend.collect(self.image, person_bbox=(10, 20, 210, 380))
+        self.assertIn("right_8", second)
+        self.assertIn("right_8", third)
+        self.assertNotIn("right_8", fourth)
+        self.assertAlmostEqual(backend.last_hand_keypoint_confidences["right_8"], 0.1)
 
     def test_depth_selector_chooses_nearest_and_never_switches_target(self):
         selector = RTMDetDepthPersonSelector(FakeNode(), FakePersonDetector())

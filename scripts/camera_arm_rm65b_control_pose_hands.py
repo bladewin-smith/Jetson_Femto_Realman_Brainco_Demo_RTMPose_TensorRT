@@ -268,7 +268,12 @@ python Demo/RMDemo_Python/RMDemo_HandPalmControl/src/core/hand_palm_rm65_control
 | `hand_use_follow_pos` | `true` | Use `rm_set_hand_follow_pos`; set `false` to use `rm_set_hand_angle`. |
 | `hand_position_min` | `0` | Fully open position value sent to each hand DOF. |
 | `hand_position_max` | `1000` | Fully closed position value sent to each hand DOF. |
-| `hand_thumb_rotate_scale` | `1.0` | Scale applied from thumb bend to the thumb rotation DOF. |
+| `hand_bend_calibration_enabled` | `true` | Calibrate the five raw vision bends before hardware output while keeping ROS diagnostic topics raw. |
+| `hand_bend_open_calibration` | `[0.18,0.08,0.13,0.09,0.13]` | Open-hand baselines in thumb/index/middle/ring/pinky order. |
+| `hand_bend_closed_calibration` | `[0.56,0.92,0.91,0.86,0.87]` | Closed-hand baselines in the same order. |
+| `hand_bend_gamma` | `[1,1,1,1,1]` | Per-finger response curve after open/closed normalization. |
+| `hand_thumb_rotate_mode` | `opposition` | Estimate thumb rotation independently from thumb-tip opposition; use `scaled-bend` for legacy behavior. |
+| `hand_thumb_rotate_scale` | `0.35` | Maximum thumb rotation proportion after independent estimation. |
 | `hand_send_hz` | `35.0` | Maximum dexterous hand command rate. |
 | `hand_wait_for_first_arm_command` | `true` | During each `s` tracking cycle, hold hand writes until the first arm tracking command succeeds. Helps avoid startup contention on the controller/tool RS485 path. |
 | `hand_wait_for_first_arm_command_timeout_s` | `1.0` | If the palm stays still and no arm command is pending, release the startup hand gate after this many seconds. |
@@ -405,6 +410,7 @@ except Exception:
     mp = None
 
 from vision_backends import RTMDetDepthPersonSelector, RTMPoseLandmarkDetector
+from hand_control import FingerBendCalibration, thumb_opposition
 
 for _DEPTH_PACKAGE_ROOT in (_SCRIPT_DIR, _SCRIPT_DIR.parent):
     if (_DEPTH_PACKAGE_ROOT / "lingbot_depth_feature_pack").exists():
@@ -1586,6 +1592,28 @@ class NeuralHandKinematics(HandKinematics):
         self.control_hand_fallback_enabled = bool(
             node.declare_parameter("control_hand_fallback_enabled", False).value
         )
+        self.thumb_rotate_mode = str(
+            node.declare_parameter("hand_thumb_rotate_mode", "opposition").value
+        ).strip().lower()
+        if self.thumb_rotate_mode not in ("opposition", "scaled-bend"):
+            raise ValueError(
+                "hand_thumb_rotate_mode must be 'opposition' or 'scaled-bend'"
+            )
+        self.thumb_opposition_open_ratio = float(
+            node.declare_parameter("hand_thumb_opposition_open_ratio", 1.05).value
+        )
+        self.thumb_opposition_closed_ratio = float(
+            node.declare_parameter("hand_thumb_opposition_closed_ratio", 0.35).value
+        )
+        self.thumb_opposition_gamma = float(
+            node.declare_parameter("hand_thumb_opposition_gamma", 1.0).value
+        )
+        if self.thumb_opposition_open_ratio <= self.thumb_opposition_closed_ratio:
+            raise ValueError(
+                "hand_thumb_opposition_open_ratio must exceed the closed ratio"
+            )
+        if self.thumb_opposition_gamma <= 0.0:
+            raise ValueError("hand_thumb_opposition_gamma must be greater than zero")
         self.enabled = bool(
             node.declare_parameter("nn_kinematics_enabled", True).value
         )
@@ -1678,6 +1706,7 @@ class NeuralHandKinematics(HandKinematics):
                 if depth_rejected:
                     source += "-depth-rejected"
 
+        bends = self._add_thumb_rotation(bends, points, prefix)
         return bends, flexion_degrees, source
 
     def finger_bends_for_side(self, points_3d, points_2d, side):
@@ -1704,7 +1733,27 @@ class NeuralHandKinematics(HandKinematics):
                 source = "NN-vectorized-3D"
             elif bends_3d is not None:
                 source = "NN-vectorized-2D-depth-rejected"
+        points = points_3d if source == "NN-vectorized-3D" else points_2d_arrays
+        bends = self._add_thumb_rotation(bends, points, prefix)
         return bends, flexion, source
+
+    def _add_thumb_rotation(self, bends, points, prefix):
+        if bends is None or self.thumb_rotate_mode != "opposition":
+            return bends
+        hand_points = self._hand_array(points, prefix)
+        if hand_points is None:
+            return bends
+        opposition = thumb_opposition(
+            hand_points,
+            open_ratio=self.thumb_opposition_open_ratio,
+            closed_ratio=self.thumb_opposition_closed_ratio,
+            gamma=self.thumb_opposition_gamma,
+        )
+        if opposition is None:
+            return bends
+        result = dict(bends)
+        result["thumb_rotate"] = opposition
+        return result
 
     def _depth_bend_disagrees_with_2d(self, bends_3d, bends_2d):
         if not self.depth_bend_reject_enabled:
@@ -4598,7 +4647,24 @@ class RMHandFingerFollower:
         self.position_min = int(node.declare_parameter("hand_position_min", 0).value)
         self.position_max = int(node.declare_parameter("hand_position_max", 1000).value)
         self.thumb_rotate_scale = float(
-            node.declare_parameter("hand_thumb_rotate_scale", 1.0).value
+            node.declare_parameter("hand_thumb_rotate_scale", 0.35).value
+        )
+        self.bend_calibration = FingerBendCalibration.create(
+            node.declare_parameter(
+                "hand_bend_open_calibration",
+                [0.18, 0.08, 0.13, 0.09, 0.13],
+            ).value,
+            node.declare_parameter(
+                "hand_bend_closed_calibration",
+                [0.56, 0.92, 0.91, 0.86, 0.87],
+            ).value,
+            node.declare_parameter(
+                "hand_bend_gamma",
+                [1.0, 1.0, 1.0, 1.0, 1.0],
+            ).value,
+            enabled=bool(
+                node.declare_parameter("hand_bend_calibration_enabled", True).value
+            ),
         )
         self.smoothing = float(
             node.declare_parameter(
@@ -4881,6 +4947,7 @@ class RMHandFingerFollower:
         self.pending_positions = None
         self.smoothed_positions = None
         self.filtered_bends = None
+        self.filtered_thumb_rotate = None
         self.spike_candidate_counts = {name: 0 for name in self.RM_HAND_LABELS}
         self.multi_finger_spike_frames = 0
         self.closure_candidate_frames = 0
@@ -4952,6 +5019,12 @@ class RMHandFingerFollower:
             f"Dexterous hand follower started with {command_name}; "
             f"order={self.RM_HAND_LABELS}, range=[{self.position_min}, {self.position_max}]"
         )
+        self.logger.info(
+            "Finger bend calibration: "
+            f"{self.bend_calibration.describe()}; "
+            f"thumb_rotate_mode={getattr(node.kinematics, 'thumb_rotate_mode', 'scaled-bend')}, "
+            f"thumb_rotate_scale={self.thumb_rotate_scale:.2f}"
+        )
 
     def _force_arm_step_mode_for_raw_modbus_if_needed(self):
         palm_follower = self.palm_follower
@@ -4998,6 +5071,7 @@ class RMHandFingerFollower:
 
         now = time.monotonic()
         if self.require_3d_bends_for_control and not self._reliable_bend_source(source):
+            self.notify_hand_lost()
             if now - self.last_unreliable_bend_log_time > 1.0:
                 self.logger.warn(
                     "Skipping hand command because finger bends are not from reliable "
@@ -5103,6 +5177,7 @@ class RMHandFingerFollower:
             self.lost_open_sent = False
         self.smoothed_positions = None
         self.filtered_bends = None
+        self.filtered_thumb_rotate = None
         self.spike_candidate_counts = {name: 0 for name in self.RM_HAND_LABELS}
         self.multi_finger_spike_frames = 0
         self.closure_candidate_frames = 0
@@ -5139,6 +5214,7 @@ class RMHandFingerFollower:
         )
         self.deadband = max(0, int(round(float(values.get("hand_deadband", self.deadband)))))
         self.filtered_bends = None
+        self.filtered_thumb_rotate = None
         self.spike_candidate_counts = {name: 0 for name in self.RM_HAND_LABELS}
         self.multi_finger_spike_frames = 0
         self.closure_candidate_frames = 0
@@ -5160,6 +5236,7 @@ class RMHandFingerFollower:
             self.pending_positions = None
         self.smoothed_positions = None
         self.filtered_bends = None
+        self.filtered_thumb_rotate = None
         self.spike_candidate_counts = {name: 0 for name in self.RM_HAND_LABELS}
         self.multi_finger_spike_frames = 0
         self.closure_candidate_frames = 0
@@ -5288,9 +5365,14 @@ class RMHandFingerFollower:
         return "3d" in source_text or "depth-rejected" in source_text
 
     def _positions_from_bends(self, bends):
+        raw_thumb_rotate = bends.get("thumb_rotate")
         bends = self._filtered_bend_values(bends)
         thumb_bend = self._bend_value(bends, "thumb")
-        thumb_rotate = max(0.0, min(1.0, thumb_bend * self.thumb_rotate_scale))
+        if raw_thumb_rotate is None:
+            thumb_rotate = thumb_bend
+        else:
+            thumb_rotate = self._filtered_thumb_rotation(raw_thumb_rotate)
+        thumb_rotate = max(0.0, min(1.0, thumb_rotate * self.thumb_rotate_scale))
         normalized = [
             self._bend_value(bends, "pinky"),
             self._bend_value(bends, "ring"),
@@ -5311,7 +5393,11 @@ class RMHandFingerFollower:
         return [self._clamp_position(round(value)) for value in self.smoothed_positions]
 
     def _filtered_bend_values(self, bends):
-        raw = {name: self._bend_value(bends, name) for name in HandKinematics.FINGER_NAMES}
+        calibrated = self.bend_calibration.apply(bends)
+        raw = {
+            name: self._bend_value(calibrated, name)
+            for name in HandKinematics.FINGER_NAMES
+        }
         raw = {
             name: 0.0 if value < self.bend_deadzone else value
             for name, value in raw.items()
@@ -5346,6 +5432,19 @@ class RMHandFingerFollower:
 
         self.filtered_bends = next_values
         return dict(self.filtered_bends)
+
+    def _filtered_thumb_rotation(self, value):
+        value = max(0.0, min(1.0, float(value)))
+        if self.filtered_thumb_rotate is None:
+            self.filtered_thumb_rotate = value
+            return value
+        previous = self.filtered_thumb_rotate
+        if self.bend_max_delta > 0.0:
+            delta = max(-self.bend_max_delta, min(self.bend_max_delta, value - previous))
+            value = previous + delta
+        value = self.bend_smoothing * value + (1.0 - self.bend_smoothing) * previous
+        self.filtered_thumb_rotate = max(0.0, min(1.0, value))
+        return self.filtered_thumb_rotate
 
     def _suppress_unconfirmed_closure(self, raw):
         if self.filtered_bends is None:
@@ -5801,6 +5900,9 @@ class HandPalmRm65ControlNode(Node):
         rtmpose_hand_inference_interval = int(
             self.declare_parameter("rtmpose_hand_inference_interval", 2).value
         )
+        rtmpose_hand_keypoint_hold_frames = int(
+            self.declare_parameter("rtmpose_hand_keypoint_hold_frames", 2).value
+        )
         mp_hands_model_complexity = int(
             self.declare_parameter("mp_hands_model_complexity", 0).value
         )
@@ -6048,6 +6150,7 @@ class HandPalmRm65ControlNode(Node):
                 hand_roi_min_size_px=rtmpose_hand_roi_min_size_px,
                 hand_roi_max_size_px=rtmpose_hand_roi_max_size_px,
                 hand_inference_interval=rtmpose_hand_inference_interval,
+                hand_keypoint_hold_frames=rtmpose_hand_keypoint_hold_frames,
                 logger=self.get_logger(),
             )
             self.person_selector = RTMDetDepthPersonSelector(self, self.detector)
@@ -6247,6 +6350,8 @@ class HandPalmRm65ControlNode(Node):
         self._publish_skeleton_3d(points_3d)
         self._publish_dual_palm_positions(points_3d)
         finger_bends, finger_source = self._publish_finger_bends(points_3d, points_2d)
+        if finger_bends is None:
+            self.hand_follower.notify_hand_lost()
         palm_distances, palm_displacement = self._publish_palm_motion(points_3d, points_2d)
         arm_offset = self.palm_follower.update_from_palm_displacement(
             palm_displacement

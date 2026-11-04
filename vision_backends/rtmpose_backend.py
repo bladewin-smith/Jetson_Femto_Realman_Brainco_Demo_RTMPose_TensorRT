@@ -239,6 +239,7 @@ class RTMPoseLandmarkDetector:
         hand_roi_min_size_px: int = 96,
         hand_roi_max_size_px: int = 420,
         hand_inference_interval: int = 1,
+        hand_keypoint_hold_frames: int = 2,
         logger: Any = None,
         runtime_impl: Any = None,
         **_ignored: Any,
@@ -290,10 +291,13 @@ class RTMPoseLandmarkDetector:
         self.hand_roi_min_size_px = max(32, int(hand_roi_min_size_px))
         self.hand_roi_max_size_px = max(self.hand_roi_min_size_px, int(hand_roi_max_size_px))
         self.hand_inference_interval = max(1, int(hand_inference_interval))
+        self.hand_keypoint_hold_frames = max(0, int(hand_keypoint_hold_frames))
         self.frame_index = 0
         self.last_pose_confidences: dict[str, float] = {}
         self.last_hand_confidences: dict[str, float] = {}
+        self.last_hand_keypoint_confidences: dict[str, float] = {}
         self._cached_hand_points: dict[str, tuple[int, int]] = {}
+        self._hand_keypoint_cache: dict[str, tuple[tuple[int, int], int]] = {}
 
     def detect_persons(self, image_bgr: np.ndarray) -> list[PersonDetection]:
         bboxes, labels = self.runtime.detect(np.ascontiguousarray(image_bgr))
@@ -321,10 +325,12 @@ class RTMPoseLandmarkDetector:
         bbox = self._clamp_bbox(bbox, width, height)
         self.last_pose_confidences = {}
         self.last_hand_confidences = {}
+        self.last_hand_keypoint_confidences = {}
         body = self.runtime.pose("body", np.ascontiguousarray(image_bgr), np.asarray([bbox], np.float32))
         body = self._first_pose(body, expected_keypoints=17)
         if body is None:
             self._cached_hand_points = {}
+            self._hand_keypoint_cache = {}
             return {}
 
         offset_x, offset_y = [int(value) for value in offset]
@@ -367,22 +373,49 @@ class RTMPoseLandmarkDetector:
             elbow = body[self.POSE_LANDMARKS[f"{side}_elbow"]]
             wrist = body[self.POSE_LANDMARKS[f"{side}_wrist"]]
             if min(float(elbow[2]), float(wrist[2])) < self.body_keypoint_threshold:
+                self._clear_hand_keypoint_cache(side)
                 continue
             roi = self.hand_roi_from_arm(elbow[:2], wrist[:2], width, height)
             hand = self.runtime.pose("hand", image_bgr, np.asarray([roi], np.float32))
             hand = self._first_pose(hand, expected_keypoints=21)
             if hand is None:
+                self._clear_hand_keypoint_cache(side)
                 continue
             valid_scores = hand[:, 2]
             self.last_hand_confidences[side] = float(np.mean(valid_scores))
             for index in range(21):
-                if float(hand[index, 2]) < self.hand_keypoint_threshold:
+                key = f"{side}_{index}"
+                score = float(hand[index, 2])
+                self.last_hand_keypoint_confidences[key] = score
+                coordinates = hand[index, :2]
+                if score >= self.hand_keypoint_threshold and np.all(np.isfinite(coordinates)):
+                    point = (
+                        int(round(float(coordinates[0]))) + offset_x,
+                        int(round(float(coordinates[1]))) + offset_y,
+                    )
+                    output[key] = point
+                    self._hand_keypoint_cache[key] = (point, self.hand_keypoint_hold_frames)
                     continue
-                output[f"{side}_{index}"] = (
-                    int(round(float(hand[index, 0]))) + offset_x,
-                    int(round(float(hand[index, 1]))) + offset_y,
-                )
+                held_point = self._held_hand_keypoint(key)
+                if held_point is not None:
+                    output[key] = held_point
         return output
+
+    def _held_hand_keypoint(self, key: str) -> tuple[int, int] | None:
+        cached = self._hand_keypoint_cache.get(key)
+        if cached is None:
+            return None
+        point, remaining = cached
+        if remaining <= 0:
+            self._hand_keypoint_cache.pop(key, None)
+            return None
+        self._hand_keypoint_cache[key] = (point, remaining - 1)
+        return point
+
+    def _clear_hand_keypoint_cache(self, side: str) -> None:
+        prefix = f"{side}_"
+        for key in [name for name in self._hand_keypoint_cache if name.startswith(prefix)]:
+            self._hand_keypoint_cache.pop(key, None)
 
     def hand_roi_from_arm(
         self,
