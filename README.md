@@ -153,6 +153,16 @@ Orbbec SDK、机械臂或灵巧手。
 | rtmpose_hand_keypoint_tracking_threshold | 0.08 | 已检测手点的低置信度连续跟踪阈值，低于主阈值时仍使用当前坐标而不是旧直指坐标 |
 | rtmpose_hand_keypoint_smoothing | 0.25 | 小幅关键点抖动的自适应平滑系数 |
 | rtmpose_hand_keypoint_fast_motion_px | 14 | 超过该位移时快速释放平滑，保证真实屈指及时响应 |
+| finger_segmentation_enabled | true | 启用掌心自适应颜色掩膜与逐指独立窄通道测量 |
+| finger_segmentation_corridor_width_ratio | 0.11 | 单指分割通道半宽相对掌宽；减小可降低相邻手指串扰 |
+| finger_segmentation_color_mad_scale | 4.0 | 掌心颜色鲁棒偏差倍数，光照变化较大时可适当增大 |
+| finger_segmentation_minimum_chroma_tolerance | 9.0 | YCrCb 色度最小容差 |
+| finger_segmentation_debug_overlay | true | 在画面中显示 I/M/R/P 独立延伸线与比例 |
+| finger_segmentation_fusion_enabled | true | 使用独立轮廓的伸直证据否决对应手指的误弯曲 |
+| finger_segmentation_min_confidence | 0.45 | 分割证据参与关键点结果融合的最低可信度 |
+| finger_segmentation_straight_threshold | 0.78 | 从该延伸比例开始逐步抑制该手指的误弯曲 |
+| finger_segmentation_full_straight_threshold | 0.92 | 达到该比例时把该手指弯曲量限制到 bend cap |
+| finger_segmentation_bend_cap | 0.12 | 明确伸直手指允许保留的最大原始弯曲量 |
 | person_min_depth_m / person_max_depth_m | 0.35 / 4.0 | 操作者深度范围 |
 | person_track_min_iou | 0.08 | 目标锁定最小 IoU |
 | control_hand_side | right | left、right 或 auto |
@@ -176,7 +186,8 @@ Orbbec SDK、机械臂或灵巧手。
     python3 -m unittest discover -s tests -v
 
 这些测试覆盖阈值与关键点映射、手 ROI、推理降频、NMS、SimCC 解码和原始
-RTMDet 输出解码。真实 engine 兼容性、FPS、Orbbec 深度质量和机械臂动作仍需在
+RTMDet 输出解码，以及相邻手指的独立轮廓分割。真实 engine 兼容性、FPS、
+Orbbec 深度质量和机械臂动作仍需在
 目标 Jetson 上分阶段验收。
 
 ## ROS 输出

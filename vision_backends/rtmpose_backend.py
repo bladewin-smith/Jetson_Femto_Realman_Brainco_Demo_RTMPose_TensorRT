@@ -16,6 +16,7 @@ from typing import Any, Iterable
 import cv2
 import numpy as np
 
+from .finger_segmentation import AdaptiveFingerSegmenter
 from .tensorrt_runtime import TensorRTRuntime
 
 
@@ -244,6 +245,11 @@ class RTMPoseLandmarkDetector:
         hand_keypoint_tracking_threshold: float = 0.08,
         hand_keypoint_smoothing: float = 0.25,
         hand_keypoint_fast_motion_px: float = 14.0,
+        finger_segmentation_enabled: bool = True,
+        finger_segmentation_corridor_width_ratio: float = 0.11,
+        finger_segmentation_color_mad_scale: float = 4.0,
+        finger_segmentation_minimum_chroma_tolerance: float = 9.0,
+        finger_segmentation_debug_overlay: bool = True,
         logger: Any = None,
         runtime_impl: Any = None,
         **_ignored: Any,
@@ -309,10 +315,23 @@ class RTMPoseLandmarkDetector:
             1.0,
             float(hand_keypoint_fast_motion_px),
         )
+        self.finger_segmentation_enabled = bool(finger_segmentation_enabled)
+        self.finger_segmentation_debug_overlay = bool(
+            finger_segmentation_debug_overlay
+        )
+        self.finger_segmenter = AdaptiveFingerSegmenter(
+            corridor_width_ratio=finger_segmentation_corridor_width_ratio,
+            color_mad_scale=finger_segmentation_color_mad_scale,
+            minimum_chroma_tolerance=finger_segmentation_minimum_chroma_tolerance,
+        )
         self.frame_index = 0
         self.last_pose_confidences: dict[str, float] = {}
         self.last_hand_confidences: dict[str, float] = {}
         self.last_hand_keypoint_confidences: dict[str, float] = {}
+        self.last_finger_extension_evidence: dict[
+            str,
+            dict[str, tuple[float, float]],
+        ] = {}
         self._cached_hand_points: dict[str, tuple[int, int]] = {}
         self._hand_keypoint_cache: dict[str, tuple[tuple[int, int], int]] = {}
         self._hand_keypoint_filter: dict[str, np.ndarray] = {}
@@ -350,6 +369,7 @@ class RTMPoseLandmarkDetector:
             self._cached_hand_points = {}
             self._hand_keypoint_cache = {}
             self._hand_keypoint_filter = {}
+            self.last_finger_extension_evidence = {}
             return {}
 
         offset_x, offset_y = [int(value) for value in offset]
@@ -364,6 +384,7 @@ class RTMPoseLandmarkDetector:
                 )
 
         if not include_hands:
+            self.last_finger_extension_evidence = {}
             return points
 
         self.frame_index += 1
@@ -434,6 +455,14 @@ class RTMPoseLandmarkDetector:
                 held_point = self._held_hand_keypoint(key)
                 if held_point is not None:
                     output[key] = held_point
+        if self.finger_segmentation_enabled:
+            self.last_finger_extension_evidence = self.finger_segmenter.analyze(
+                image_bgr,
+                output,
+                offset,
+            )
+        else:
+            self.last_finger_extension_evidence = {}
         return output
 
     def _filter_hand_keypoint(
@@ -580,6 +609,10 @@ class RTMPoseLandmarkDetector:
 
     def close(self) -> None:
         self.runtime.close()
+
+    def draw_finger_segmentation(self, image_bgr: np.ndarray) -> None:
+        if self.finger_segmentation_enabled and self.finger_segmentation_debug_overlay:
+            self.finger_segmenter.draw_debug(image_bgr)
 
 
 class RTMDetDepthPersonSelector:

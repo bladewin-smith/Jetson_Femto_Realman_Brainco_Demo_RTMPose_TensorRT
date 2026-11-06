@@ -412,6 +412,7 @@ except Exception:
     mp = None
 
 from vision_backends import RTMDetDepthPersonSelector, RTMPoseLandmarkDetector
+from vision_backends.finger_segmentation import apply_straight_finger_veto
 from hand_control import (
     FingerBendCalibration,
     FingerBendHysteresis,
@@ -1614,6 +1615,25 @@ class NeuralHandKinematics(HandKinematics):
         self.thumb_opposition_gamma = float(
             node.declare_parameter("hand_thumb_opposition_gamma", 1.0).value
         )
+        self.finger_segmentation_fusion_enabled = bool(
+            node.declare_parameter("finger_segmentation_fusion_enabled", True).value
+        )
+        self.finger_segmentation_min_confidence = float(
+            node.declare_parameter("finger_segmentation_min_confidence", 0.45).value
+        )
+        self.finger_segmentation_straight_threshold = float(
+            node.declare_parameter("finger_segmentation_straight_threshold", 0.78).value
+        )
+        self.finger_segmentation_full_straight_threshold = float(
+            node.declare_parameter(
+                "finger_segmentation_full_straight_threshold",
+                0.92,
+            ).value
+        )
+        self.finger_segmentation_bend_cap = float(
+            node.declare_parameter("finger_segmentation_bend_cap", 0.12).value
+        )
+        self.finger_extension_evidence = {}
         if self.thumb_opposition_open_ratio <= self.thumb_opposition_closed_ratio:
             raise ValueError(
                 "hand_thumb_opposition_open_ratio must exceed the closed ratio"
@@ -1712,6 +1732,12 @@ class NeuralHandKinematics(HandKinematics):
                 if depth_rejected:
                     source += "-depth-rejected"
 
+        bends, flexion_degrees, source = self._apply_finger_segmentation_veto(
+            bends,
+            flexion_degrees,
+            prefix,
+            source,
+        )
         bends = self._add_thumb_rotation(bends, points, prefix)
         return bends, flexion_degrees, source
 
@@ -1739,9 +1765,46 @@ class NeuralHandKinematics(HandKinematics):
                 source = "NN-vectorized-3D"
             elif bends_3d is not None:
                 source = "NN-vectorized-2D-depth-rejected"
-        points = points_3d if source == "NN-vectorized-3D" else points_2d_arrays
+        bends, flexion, source = self._apply_finger_segmentation_veto(
+            bends,
+            flexion,
+            prefix,
+            source,
+        )
+        points = points_3d if "NN-vectorized-3D" in source else points_2d_arrays
         bends = self._add_thumb_rotation(bends, points, prefix)
         return bends, flexion, source
+
+    def set_finger_extension_evidence(self, evidence):
+        self.finger_extension_evidence = evidence or {}
+
+    def _apply_finger_segmentation_veto(
+        self,
+        bends,
+        flexion_degrees,
+        prefix,
+        source,
+    ):
+        if not self.finger_segmentation_fusion_enabled or bends is None:
+            return bends, flexion_degrees, source
+        side_evidence = self.finger_extension_evidence.get(prefix, {})
+        corrected_bends, corrected_names = apply_straight_finger_veto(
+            bends,
+            side_evidence,
+            min_confidence=self.finger_segmentation_min_confidence,
+            straight_threshold=self.finger_segmentation_straight_threshold,
+            full_straight_threshold=self.finger_segmentation_full_straight_threshold,
+            bend_cap=self.finger_segmentation_bend_cap,
+        )
+        if not corrected_names:
+            return bends, flexion_degrees, source
+        corrected_flexion = dict(flexion_degrees)
+        for name in corrected_names:
+            corrected_flexion[name] = (
+                corrected_bends[name] * self.FINGER_MAX_FLEXION_DEG[name]
+            )
+        corrected_source = f"{source}+finger-mask:{','.join(corrected_names)}"
+        return corrected_bends, corrected_flexion, corrected_source
 
     def _add_thumb_rotation(self, bends, points, prefix):
         if bends is None or self.thumb_rotate_mode != "opposition":
@@ -5962,6 +6025,27 @@ class HandPalmRm65ControlNode(Node):
                 14.0,
             ).value
         )
+        finger_segmentation_enabled = bool(
+            self.declare_parameter("finger_segmentation_enabled", True).value
+        )
+        finger_segmentation_corridor_width_ratio = float(
+            self.declare_parameter(
+                "finger_segmentation_corridor_width_ratio",
+                0.11,
+            ).value
+        )
+        finger_segmentation_color_mad_scale = float(
+            self.declare_parameter("finger_segmentation_color_mad_scale", 4.0).value
+        )
+        finger_segmentation_minimum_chroma_tolerance = float(
+            self.declare_parameter(
+                "finger_segmentation_minimum_chroma_tolerance",
+                9.0,
+            ).value
+        )
+        finger_segmentation_debug_overlay = bool(
+            self.declare_parameter("finger_segmentation_debug_overlay", True).value
+        )
         mp_hands_model_complexity = int(
             self.declare_parameter("mp_hands_model_complexity", 0).value
         )
@@ -6216,6 +6300,19 @@ class HandPalmRm65ControlNode(Node):
                 ),
                 hand_keypoint_smoothing=rtmpose_hand_keypoint_smoothing,
                 hand_keypoint_fast_motion_px=rtmpose_hand_keypoint_fast_motion_px,
+                finger_segmentation_enabled=finger_segmentation_enabled,
+                finger_segmentation_corridor_width_ratio=(
+                    finger_segmentation_corridor_width_ratio
+                ),
+                finger_segmentation_color_mad_scale=(
+                    finger_segmentation_color_mad_scale
+                ),
+                finger_segmentation_minimum_chroma_tolerance=(
+                    finger_segmentation_minimum_chroma_tolerance
+                ),
+                finger_segmentation_debug_overlay=(
+                    finger_segmentation_debug_overlay
+                ),
                 logger=self.get_logger(),
             )
             self.person_selector = RTMDetDepthPersonSelector(self, self.detector)
@@ -6426,6 +6523,14 @@ class HandPalmRm65ControlNode(Node):
             source=finger_source,
         )
         arm_angles = self._log_arm_angles(points_3d, points_2d)
+
+        draw_finger_segmentation = getattr(
+            self.detector,
+            "draw_finger_segmentation",
+            None,
+        )
+        if callable(draw_finger_segmentation):
+            draw_finger_segmentation(color_image)
 
         if points_3d:
             self._publish_motion_velocity(points_3d)
@@ -6863,6 +6968,9 @@ class HandPalmRm65ControlNode(Node):
         return points_3d
 
     def _publish_finger_bends(self, points_3d, points_2d):
+        self.kinematics.set_finger_extension_evidence(
+            getattr(self.detector, "last_finger_extension_evidence", {})
+        )
         self._publish_dual_hand_bends(points_3d, points_2d)
         bends, flexion_degrees, source = self.kinematics.finger_bends(
             points_3d,
