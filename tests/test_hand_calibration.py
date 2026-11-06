@@ -3,6 +3,7 @@ import unittest
 import numpy as np
 
 from hand_control import (
+    AutoZeroHysteresisFilter,
     FingerBendCalibration,
     FingerBendHysteresis,
     thumb_opposition,
@@ -67,6 +68,38 @@ class FingerBendHysteresisTests(unittest.TestCase):
         stabilizer = FingerBendHysteresis(0.12, 0.05, 0.03)
         self.assertAlmostEqual(stabilizer.apply({"middle": 0.50})["middle"], 0.50)
         self.assertAlmostEqual(stabilizer.apply({"middle": 0.52})["middle"], 0.50)
+
+
+class AutoZeroHysteresisFilterTests(unittest.TestCase):
+    def test_straight_baseline_and_noise_are_locked_to_zero(self):
+        stabilizer = AutoZeroHysteresisFilter(
+            engage_threshold=0.22,
+            release_threshold=0.08,
+            confirm_frames=3,
+            auto_zero_samples=5,
+            auto_zero_margin=0.04,
+        )
+        for value in (0.16, 0.18, 0.17, 0.19, 0.18):
+            self.assertEqual(stabilizer.apply(value), 0.0)
+        self.assertTrue(stabilizer.baseline_ready)
+        self.assertAlmostEqual(stabilizer.baseline, 0.18, places=5)
+        for value in (0.19, 0.21, 0.20, 0.23):
+            self.assertEqual(stabilizer.apply(value), 0.0)
+
+    def test_real_motion_needs_confirmation_then_releases_at_lower_threshold(self):
+        stabilizer = AutoZeroHysteresisFilter(
+            engage_threshold=0.25,
+            release_threshold=0.10,
+            confirm_frames=3,
+            jitter_deadband=0.04,
+            auto_zero_enabled=False,
+        )
+        self.assertEqual(stabilizer.apply(0.60), 0.0)
+        self.assertEqual(stabilizer.apply(0.60), 0.0)
+        self.assertAlmostEqual(stabilizer.apply(0.60), 0.60)
+        self.assertAlmostEqual(stabilizer.apply(0.58), 0.60)
+        self.assertAlmostEqual(stabilizer.apply(0.20), 0.25)
+        self.assertEqual(stabilizer.apply(0.08), 0.0)
 
 
 if __name__ == "__main__":

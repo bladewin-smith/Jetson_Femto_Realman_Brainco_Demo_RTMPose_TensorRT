@@ -274,6 +274,12 @@ python Demo/RMDemo_Python/RMDemo_HandPalmControl/src/core/hand_palm_rm65_control
 | `hand_bend_gamma` | `[1,1,1,1,1]` | Per-finger response curve after open/closed normalization. |
 | `hand_thumb_rotate_mode` | `opposition` | Estimate thumb rotation independently from thumb-tip opposition; use `scaled-bend` for legacy behavior. |
 | `hand_thumb_rotate_scale` | `0.35` | Maximum thumb rotation proportion after independent estimation. |
+| `hand_thumb_straight_lock_enabled` | `true` | Apply thumb-only auto-zero, hysteresis, confirmation, and jitter lock. |
+| `hand_thumb_auto_zero_samples` | `5` | Valid tracking frames used to learn the straight-thumb baseline. |
+| `hand_thumb_bend_engage_threshold` | `0.22` | Corrected thumb bend required to enter the active state. |
+| `hand_thumb_bend_release_threshold` | `0.08` | Lower corrected thumb bend that releases back to straight. |
+| `hand_thumb_rotate_engage_threshold` | `0.30` | Corrected opposition required to activate thumb rotation. |
+| `hand_thumb_rotate_release_threshold` | `0.12` | Lower opposition threshold that releases thumb rotation. |
 | `hand_send_hz` | `35.0` | Maximum dexterous hand command rate. |
 | `hand_wait_for_first_arm_command` | `true` | During each `s` tracking cycle, hold hand writes until the first arm tracking command succeeds. Helps avoid startup contention on the controller/tool RS485 path. |
 | `hand_wait_for_first_arm_command_timeout_s` | `1.0` | If the palm stays still and no arm command is pending, release the startup hand gate after this many seconds. |
@@ -414,6 +420,7 @@ except Exception:
 from vision_backends import RTMDetDepthPersonSelector, RTMPoseLandmarkDetector
 from vision_backends.finger_segmentation import apply_straight_finger_veto
 from hand_control import (
+    AutoZeroHysteresisFilter,
     FingerBendCalibration,
     FingerBendHysteresis,
     thumb_opposition,
@@ -4718,6 +4725,36 @@ class RMHandFingerFollower:
         self.thumb_rotate_scale = float(
             node.declare_parameter("hand_thumb_rotate_scale", 0.35).value
         )
+        self.thumb_straight_lock_enabled = bool(
+            node.declare_parameter("hand_thumb_straight_lock_enabled", True).value
+        )
+        self.thumb_auto_zero_enabled = bool(
+            node.declare_parameter("hand_thumb_auto_zero_enabled", True).value
+        )
+        self.thumb_auto_zero_samples = int(
+            node.declare_parameter("hand_thumb_auto_zero_samples", 5).value
+        )
+        self.thumb_auto_zero_margin = float(
+            node.declare_parameter("hand_thumb_auto_zero_margin", 0.04).value
+        )
+        self.thumb_bend_engage_threshold = float(
+            node.declare_parameter("hand_thumb_bend_engage_threshold", 0.22).value
+        )
+        self.thumb_bend_release_threshold = float(
+            node.declare_parameter("hand_thumb_bend_release_threshold", 0.08).value
+        )
+        self.thumb_rotate_engage_threshold = float(
+            node.declare_parameter("hand_thumb_rotate_engage_threshold", 0.30).value
+        )
+        self.thumb_rotate_release_threshold = float(
+            node.declare_parameter("hand_thumb_rotate_release_threshold", 0.12).value
+        )
+        self.thumb_state_confirm_frames = int(
+            node.declare_parameter("hand_thumb_state_confirm_frames", 3).value
+        )
+        self.thumb_jitter_deadband = float(
+            node.declare_parameter("hand_thumb_jitter_deadband", 0.04).value
+        )
         self.bend_calibration = FingerBendCalibration.create(
             node.declare_parameter(
                 "hand_bend_open_calibration",
@@ -5036,6 +5073,24 @@ class RMHandFingerFollower:
             release_threshold=self.bend_release_threshold,
             jitter_deadband=self.bend_jitter_deadband,
         )
+        thumb_filter_common = {
+            "confirm_frames": self.thumb_state_confirm_frames,
+            "jitter_deadband": self.thumb_jitter_deadband,
+            "auto_zero_enabled": self.thumb_auto_zero_enabled,
+            "auto_zero_samples": self.thumb_auto_zero_samples,
+            "auto_zero_margin": self.thumb_auto_zero_margin,
+            "enabled": self.thumb_straight_lock_enabled,
+        }
+        self.thumb_bend_stabilizer = AutoZeroHysteresisFilter(
+            engage_threshold=self.thumb_bend_engage_threshold,
+            release_threshold=self.thumb_bend_release_threshold,
+            **thumb_filter_common,
+        )
+        self.thumb_rotate_stabilizer = AutoZeroHysteresisFilter(
+            engage_threshold=self.thumb_rotate_engage_threshold,
+            release_threshold=self.thumb_rotate_release_threshold,
+            **thumb_filter_common,
+        )
 
         self.target_lock = threading.Lock()
         self.stop_event = threading.Event()
@@ -5043,6 +5098,7 @@ class RMHandFingerFollower:
         self.smoothed_positions = None
         self.filtered_bends = None
         self.filtered_thumb_rotate = None
+        self.thumb_baseline_logged = False
         self.spike_candidate_counts = {name: 0 for name in self.RM_HAND_LABELS}
         self.multi_finger_spike_frames = 0
         self.closure_candidate_frames = 0
@@ -5121,7 +5177,14 @@ class RMHandFingerFollower:
             f"release={self.bend_release_threshold:.3f}, "
             f"jitter={self.bend_jitter_deadband:.3f}; "
             f"thumb_rotate_mode={getattr(node.kinematics, 'thumb_rotate_mode', 'scaled-bend')}, "
-            f"thumb_rotate_scale={self.thumb_rotate_scale:.2f}"
+            f"thumb_rotate_scale={self.thumb_rotate_scale:.2f}; "
+            f"thumb_lock={self.thumb_straight_lock_enabled}, "
+            f"thumb_auto_zero={self.thumb_auto_zero_enabled}/"
+            f"{self.thumb_auto_zero_samples} frames, "
+            f"thumb_bend={self.thumb_bend_release_threshold:.2f}->"
+            f"{self.thumb_bend_engage_threshold:.2f}, "
+            f"thumb_rotate={self.thumb_rotate_release_threshold:.2f}->"
+            f"{self.thumb_rotate_engage_threshold:.2f}"
         )
 
     def _force_arm_step_mode_for_raw_modbus_if_needed(self):
@@ -5277,6 +5340,9 @@ class RMHandFingerFollower:
         self.filtered_bends = None
         self.filtered_thumb_rotate = None
         self.bend_hysteresis.reset()
+        self.thumb_bend_stabilizer.reset()
+        self.thumb_rotate_stabilizer.reset()
+        self.thumb_baseline_logged = False
         self.spike_candidate_counts = {name: 0 for name in self.RM_HAND_LABELS}
         self.multi_finger_spike_frames = 0
         self.closure_candidate_frames = 0
@@ -5321,6 +5387,9 @@ class RMHandFingerFollower:
             self.bend_release_threshold,
             self.bend_jitter_deadband,
         )
+        self.thumb_bend_stabilizer.reset()
+        self.thumb_rotate_stabilizer.reset()
+        self.thumb_baseline_logged = False
         self.spike_candidate_counts = {name: 0 for name in self.RM_HAND_LABELS}
         self.multi_finger_spike_frames = 0
         self.closure_candidate_frames = 0
@@ -5344,6 +5413,9 @@ class RMHandFingerFollower:
         self.filtered_bends = None
         self.filtered_thumb_rotate = None
         self.bend_hysteresis.reset()
+        self.thumb_bend_stabilizer.reset()
+        self.thumb_rotate_stabilizer.reset()
+        self.thumb_baseline_logged = False
         self.spike_candidate_counts = {name: 0 for name in self.RM_HAND_LABELS}
         self.multi_finger_spike_frames = 0
         self.closure_candidate_frames = 0
@@ -5505,6 +5577,7 @@ class RMHandFingerFollower:
             name: self._bend_value(calibrated, name)
             for name in HandKinematics.FINGER_NAMES
         }
+        raw["thumb"] = self.thumb_bend_stabilizer.apply(raw["thumb"])
         raw = self.bend_hysteresis.apply(raw)
         if self.filtered_bends is None:
             self.filtered_bends = dict(raw)
@@ -5539,6 +5612,19 @@ class RMHandFingerFollower:
 
     def _filtered_thumb_rotation(self, value):
         value = max(0.0, min(1.0, float(value)))
+        value = self.thumb_rotate_stabilizer.apply(value)
+        if (
+            self.thumb_auto_zero_enabled
+            and not self.thumb_baseline_logged
+            and self.thumb_bend_stabilizer.baseline_ready
+            and self.thumb_rotate_stabilizer.baseline_ready
+        ):
+            self.logger.info(
+                "Thumb auto-zero ready: "
+                f"bend_baseline={self.thumb_bend_stabilizer.baseline:.3f}, "
+                f"rotate_baseline={self.thumb_rotate_stabilizer.baseline:.3f}"
+            )
+            self.thumb_baseline_logged = True
         if self.filtered_thumb_rotate is None:
             self.filtered_thumb_rotate = value
             return value

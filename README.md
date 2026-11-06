@@ -178,6 +178,14 @@ Orbbec SDK、机械臂或灵巧手。
 | hand_spike_confirm_frames | 2 | 单指大幅弯曲连续两帧即确认，避免把真实食指/中指动作长期当成尖峰 |
 | hand_thumb_rotate_mode | opposition | `opposition` 根据拇指尖相对掌宽独立计算旋转；`scaled-bend` 保留旧映射 |
 | hand_thumb_rotate_scale | 0.35 | 拇指旋转轴最大比例，首次标定建议保持 0.35 |
+| hand_thumb_straight_lock_enabled | true | 仅对拇指启用自动归零、迟滞和连续帧确认，不影响其余四指 |
+| hand_thumb_auto_zero_enabled | true | 每次开始跟踪时学习操作者拇指绷直状态的非零视觉偏差 |
+| hand_thumb_auto_zero_samples | 5 | 开始跟踪后用于自动归零的有效帧数；这几帧必须保持拇指绷直 |
+| hand_thumb_auto_zero_margin | 0.04 | 在学习基线之上额外忽略的拇指噪声范围 |
+| hand_thumb_bend_engage_threshold / release_threshold | 0.22 / 0.08 | 拇指弯曲轴进入/退出动作状态的双阈值 |
+| hand_thumb_rotate_engage_threshold / release_threshold | 0.30 / 0.12 | 拇指旋转轴进入/退出动作状态的双阈值 |
+| hand_thumb_state_confirm_frames | 3 | 拇指动作必须连续超过进入阈值的帧数 |
+| hand_thumb_jitter_deadband | 0.04 | 拇指已动作状态下保持不变的微小波动范围 |
 
 ## 测试
 
