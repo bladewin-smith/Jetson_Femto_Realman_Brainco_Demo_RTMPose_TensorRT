@@ -19,6 +19,7 @@ class FakeRuntime:
     def __init__(self):
         self.pose_calls = []
         self.hand_scores = np.full(21, 0.9, np.float32)
+        self.hand_shift = np.zeros(2, np.float32)
 
     def detect(self, _image):
         return (
@@ -39,8 +40,10 @@ class FakeRuntime:
             body[10, :2] = (170, 220)
             return body[None, ...]
         hand = np.zeros((21, 3), np.float32)
-        hand[:, 0] = np.arange(21) + float(bboxes[0, 0])
-        hand[:, 1] = np.arange(21) + float(bboxes[0, 1])
+        # Pose runtime outputs are already mapped back to full-image pixels and
+        # therefore must not move merely because the next-frame ROI is tighter.
+        hand[:, 0] = np.arange(21) + 100.0 + self.hand_shift[0]
+        hand[:, 1] = np.arange(21) + 150.0 + self.hand_shift[1]
         hand[:, 2] = self.hand_scores
         return hand[None, ...]
 
@@ -102,6 +105,18 @@ class RTMPoseBackendTests(unittest.TestCase):
         self.assertLessEqual(x1, 100)
         self.assertLessEqual(y1, 120)
 
+    def test_tracked_hand_roi_is_tight_and_inside_image(self):
+        self.backend.collect(self.image, person_bbox=(10, 20, 210, 380))
+        roi = self.backend.hand_roi_from_tracked_points("right", 480, 400)
+        self.assertIsNotNone(roi)
+        x0, y0, x1, y1 = roi
+        self.assertEqual(x1 - x0, y1 - y0)
+        self.assertGreaterEqual(x0, 0)
+        self.assertGreaterEqual(y0, 0)
+        self.assertLessEqual(x1, 480)
+        self.assertLessEqual(y1, 400)
+        self.assertLessEqual(x1 - x0, self.backend.hand_roi_max_size_px)
+
     def test_hand_interval_reuses_one_frame(self):
         self.backend.collect(self.image, person_bbox=(10, 20, 210, 380))
         calls_after_first = len(self.runtime.pose_calls)
@@ -113,6 +128,7 @@ class RTMPoseBackendTests(unittest.TestCase):
             runtime_impl=self.runtime,
             body_keypoint_threshold=0.35,
             hand_keypoint_threshold=0.5,
+            hand_keypoint_tracking_threshold=0.2,
             hand_inference_interval=1,
             hand_keypoint_hold_frames=2,
         )
@@ -126,6 +142,36 @@ class RTMPoseBackendTests(unittest.TestCase):
         self.assertIn("right_8", third)
         self.assertNotIn("right_8", fourth)
         self.assertAlmostEqual(backend.last_hand_keypoint_confidences["right_8"], 0.1)
+
+    def test_low_confidence_measurement_moves_instead_of_holding_straight_pose(self):
+        backend = RTMPoseLandmarkDetector(
+            runtime_impl=self.runtime,
+            hand_keypoint_threshold=0.5,
+            hand_keypoint_tracking_threshold=0.08,
+            hand_keypoint_smoothing=0.1,
+            hand_keypoint_fast_motion_px=5.0,
+            hand_inference_interval=1,
+            hand_keypoint_hold_frames=0,
+        )
+        first = backend.collect(self.image, person_bbox=(10, 20, 210, 380))
+        first_tip = first["right_8"]
+        self.runtime.hand_scores[8] = 0.1
+        self.runtime.hand_shift[0] = 20.0
+        second = backend.collect(self.image, person_bbox=(10, 20, 210, 380))
+        self.assertEqual(second["right_8"][0], first_tip[0] + 20)
+
+    def test_subpixel_landmark_jitter_is_suppressed(self):
+        backend = RTMPoseLandmarkDetector(
+            runtime_impl=self.runtime,
+            hand_keypoint_smoothing=0.1,
+            hand_keypoint_fast_motion_px=20.0,
+            hand_inference_interval=1,
+            hand_keypoint_hold_frames=0,
+        )
+        first = backend.collect(self.image, person_bbox=(10, 20, 210, 380))
+        self.runtime.hand_shift[0] = 1.0
+        second = backend.collect(self.image, person_bbox=(10, 20, 210, 380))
+        self.assertEqual(second["right_8"], first["right_8"])
 
     def test_depth_selector_chooses_nearest_and_never_switches_target(self):
         selector = RTMDetDepthPersonSelector(FakeNode(), FakePersonDetector())

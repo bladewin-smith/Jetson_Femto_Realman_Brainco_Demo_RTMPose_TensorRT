@@ -147,8 +147,12 @@ Orbbec SDK、机械臂或灵巧手。
 | rtmpose_hand_keypoint_threshold | 0.25 | 手部关键点阈值 |
 | rtmpose_hand_roi_scale | 2.25 | 手 ROI 边长与前臂长度比例 |
 | rtmpose_hand_roi_wrist_extension | 0.35 | ROI 沿肘到腕向外延伸比例 |
-| rtmpose_hand_inference_interval | 2 | 双手推理间隔 |
-| rtmpose_hand_keypoint_hold_frames | 2 | 单个低置信度手点最多复用的手部推理帧数；持续丢失后停止更新并触发安全逻辑 |
+| rtmpose_hand_tracking_roi_scale | 1.55 | 首次识别后按上一帧手点生成紧凑 ROI，提高单指弯曲的输入分辨率 |
+| rtmpose_hand_inference_interval | 1 | 双手推理间隔；逐帧推理可避免快速屈指被跳过 |
+| rtmpose_hand_keypoint_hold_frames | 0 | 低置信度点复用帧数；手指控制默认禁用旧姿态滞留 |
+| rtmpose_hand_keypoint_tracking_threshold | 0.08 | 已检测手点的低置信度连续跟踪阈值，低于主阈值时仍使用当前坐标而不是旧直指坐标 |
+| rtmpose_hand_keypoint_smoothing | 0.25 | 小幅关键点抖动的自适应平滑系数 |
+| rtmpose_hand_keypoint_fast_motion_px | 14 | 超过该位移时快速释放平滑，保证真实屈指及时响应 |
 | person_min_depth_m / person_max_depth_m | 0.35 / 4.0 | 操作者深度范围 |
 | person_track_min_iou | 0.08 | 目标锁定最小 IoU |
 | control_hand_side | right | left、right 或 auto |
@@ -158,6 +162,10 @@ Orbbec SDK、机械臂或灵巧手。
 | hand_bend_open_calibration | `[0.18,0.08,0.13,0.09,0.13]` | 完全张开标定，顺序为 thumb/index/middle/ring/pinky |
 | hand_bend_closed_calibration | `[0.56,0.92,0.91,0.86,0.87]` | 完全握拳标定，顺序同上 |
 | hand_bend_gamma | `[1,1,1,1,1]` | 逐指响应曲线；大于 1 会减弱中段，小于 1 会增强中段 |
+| hand_bend_deadzone | 0.10 | 标定后弯曲量进入弯曲状态的阈值 |
+| hand_bend_release_threshold | 0.04 | 已弯曲手指返回伸直状态的较低阈值，和进入阈值形成迟滞区 |
+| hand_bend_jitter_deadband | 0.025 | 已激活手指的微小弯曲量变化保持不动，抑制电机抖动 |
+| hand_spike_confirm_frames | 2 | 单指大幅弯曲连续两帧即确认，避免把真实食指/中指动作长期当成尖峰 |
 | hand_thumb_rotate_mode | opposition | `opposition` 根据拇指尖相对掌宽独立计算旋转；`scaled-bend` 保留旧映射 |
 | hand_thumb_rotate_scale | 0.35 | 拇指旋转轴最大比例，首次标定建议保持 0.35 |
 

@@ -285,11 +285,13 @@ python Demo/RMDemo_Python/RMDemo_HandPalmControl/src/core/hand_palm_rm65_control
 | `Hand_alpha_pct` GUI | n/a | GUI trackbar for `hand_smoothing`. Higher values make the hand respond faster but may pass more vision noise. |
 | `Hand_db` GUI | n/a | GUI trackbar for `hand_deadband`. Lower values make small finger changes respond sooner. |
 | `hand_bend_deadzone` | `0.10` | Finger bend values below this are treated as open-hand noise. |
+| `hand_bend_release_threshold` | `0.04` | Lower threshold for returning an active finger to open; provides bend hysteresis. |
+| `hand_bend_jitter_deadband` | `0.025` | Hold small active bend changes to prevent actuator chatter. |
 | `hand_bend_smoothing` | `0.65` | Low-pass alpha applied to detected finger bends before converting to hand positions. Higher values respond faster. |
 | `hand_bend_max_delta` | `0.60` | Maximum bend-value change per detection update. Larger values allow quicker finger closing/opening. |
 | `hand_require_3d_bends_for_control` | `true` | Only send hand commands when finger bends come from reliable 3D landmarks. |
 | `hand_reject_single_finger_spikes` | `true` | Reject isolated non-thumb finger spikes unless they persist for `hand_spike_confirm_frames`. |
-| `hand_spike_confirm_frames` | `3` | Consecutive frames needed to accept an isolated finger-bend spike. |
+| `hand_spike_confirm_frames` | `2` | Consecutive frames needed to accept an isolated finger bend. |
 | `hand_reject_multi_finger_spikes` | `true` | Hold sudden multi-finger bend jumps until they persist for several frames. |
 | `hand_multi_finger_spike_delta` | `0.30` | Per-finger bend jump threshold used by the multi-finger spike rejector. |
 | `hand_multi_finger_spike_min_count` | `2` | Minimum number of non-thumb fingers that must jump together before multi-finger spike filtering applies. |
@@ -410,7 +412,11 @@ except Exception:
     mp = None
 
 from vision_backends import RTMDetDepthPersonSelector, RTMPoseLandmarkDetector
-from hand_control import FingerBendCalibration, thumb_opposition
+from hand_control import (
+    FingerBendCalibration,
+    FingerBendHysteresis,
+    thumb_opposition,
+)
 
 for _DEPTH_PACKAGE_ROOT in (_SCRIPT_DIR, _SCRIPT_DIR.parent):
     if (_DEPTH_PACKAGE_ROOT / "lingbot_depth_feature_pack").exists():
@@ -4684,6 +4690,12 @@ class RMHandFingerFollower:
                 persistent_default(node, "hand_bend_deadzone", 0.10),
             ).value
         )
+        self.bend_release_threshold = float(
+            node.declare_parameter("hand_bend_release_threshold", 0.04).value
+        )
+        self.bend_jitter_deadband = float(
+            node.declare_parameter("hand_bend_jitter_deadband", 0.025).value
+        )
         self.bend_smoothing = float(
             node.declare_parameter(
                 "hand_bend_smoothing",
@@ -4706,7 +4718,7 @@ class RMHandFingerFollower:
             node.declare_parameter("hand_single_finger_spike_peer_max", 0.22).value
         )
         self.spike_confirm_frames = int(
-            node.declare_parameter("hand_spike_confirm_frames", 4).value
+            node.declare_parameter("hand_spike_confirm_frames", 2).value
         )
         self.require_3d_bends_for_control = bool(
             node.declare_parameter("hand_require_3d_bends_for_control", True).value
@@ -4927,6 +4939,21 @@ class RMHandFingerFollower:
             raise ValueError("hand_position_max must be greater than hand_position_min")
         self.smoothing = max(0.0, min(1.0, self.smoothing))
         self.bend_deadzone = max(0.0, min(1.0, self.bend_deadzone))
+        self.bend_release_threshold = max(
+            0.0,
+            min(1.0, self.bend_release_threshold),
+        )
+        self.bend_jitter_deadband = max(
+            0.0,
+            min(1.0, self.bend_jitter_deadband),
+        )
+        if self.bend_release_threshold >= self.bend_deadzone:
+            self.bend_release_threshold = max(0.0, self.bend_deadzone * 0.5)
+            self.logger.warn(
+                "hand_bend_release_threshold must be lower than "
+                "hand_bend_deadzone; using "
+                f"{self.bend_release_threshold:.3f}"
+            )
         self.bend_smoothing = max(0.0, min(1.0, self.bend_smoothing))
         self.bend_max_delta = max(0.0, min(1.0, self.bend_max_delta))
         self.spike_confirm_frames = max(1, self.spike_confirm_frames)
@@ -4941,6 +4968,11 @@ class RMHandFingerFollower:
         self.closure_confirm_value = max(0.0, min(1.0, self.closure_confirm_value))
         self.closure_confirm_min_fingers = max(1, self.closure_confirm_min_fingers)
         self.send_interval_s = 1.0 / max(self.send_hz, 1.0)
+        self.bend_hysteresis = FingerBendHysteresis(
+            engage_threshold=self.bend_deadzone,
+            release_threshold=self.bend_release_threshold,
+            jitter_deadband=self.bend_jitter_deadband,
+        )
 
         self.target_lock = threading.Lock()
         self.stop_event = threading.Event()
@@ -5022,6 +5054,9 @@ class RMHandFingerFollower:
         self.logger.info(
             "Finger bend calibration: "
             f"{self.bend_calibration.describe()}; "
+            f"engage={self.bend_deadzone:.3f}, "
+            f"release={self.bend_release_threshold:.3f}, "
+            f"jitter={self.bend_jitter_deadband:.3f}; "
             f"thumb_rotate_mode={getattr(node.kinematics, 'thumb_rotate_mode', 'scaled-bend')}, "
             f"thumb_rotate_scale={self.thumb_rotate_scale:.2f}"
         )
@@ -5178,6 +5213,7 @@ class RMHandFingerFollower:
         self.smoothed_positions = None
         self.filtered_bends = None
         self.filtered_thumb_rotate = None
+        self.bend_hysteresis.reset()
         self.spike_candidate_counts = {name: 0 for name in self.RM_HAND_LABELS}
         self.multi_finger_spike_frames = 0
         self.closure_candidate_frames = 0
@@ -5198,6 +5234,8 @@ class RMHandFingerFollower:
             0.0,
             min(1.0, float(values.get("hand_bend_deadzone", self.bend_deadzone))),
         )
+        if self.bend_release_threshold >= self.bend_deadzone:
+            self.bend_release_threshold = max(0.0, self.bend_deadzone * 0.5)
         self.bend_smoothing = max(
             0.0,
             min(1.0, float(values.get("hand_bend_smoothing", self.bend_smoothing))),
@@ -5215,6 +5253,11 @@ class RMHandFingerFollower:
         self.deadband = max(0, int(round(float(values.get("hand_deadband", self.deadband)))))
         self.filtered_bends = None
         self.filtered_thumb_rotate = None
+        self.bend_hysteresis.configure(
+            self.bend_deadzone,
+            self.bend_release_threshold,
+            self.bend_jitter_deadband,
+        )
         self.spike_candidate_counts = {name: 0 for name in self.RM_HAND_LABELS}
         self.multi_finger_spike_frames = 0
         self.closure_candidate_frames = 0
@@ -5237,6 +5280,7 @@ class RMHandFingerFollower:
         self.smoothed_positions = None
         self.filtered_bends = None
         self.filtered_thumb_rotate = None
+        self.bend_hysteresis.reset()
         self.spike_candidate_counts = {name: 0 for name in self.RM_HAND_LABELS}
         self.multi_finger_spike_frames = 0
         self.closure_candidate_frames = 0
@@ -5398,10 +5442,7 @@ class RMHandFingerFollower:
             name: self._bend_value(calibrated, name)
             for name in HandKinematics.FINGER_NAMES
         }
-        raw = {
-            name: 0.0 if value < self.bend_deadzone else value
-            for name, value in raw.items()
-        }
+        raw = self.bend_hysteresis.apply(raw)
         if self.filtered_bends is None:
             self.filtered_bends = dict(raw)
             return dict(self.filtered_bends)
@@ -5897,11 +5938,29 @@ class HandPalmRm65ControlNode(Node):
         rtmpose_hand_roi_max_size_px = int(
             self.declare_parameter("rtmpose_hand_roi_max_size_px", 420).value
         )
+        rtmpose_hand_tracking_roi_scale = float(
+            self.declare_parameter("rtmpose_hand_tracking_roi_scale", 1.55).value
+        )
         rtmpose_hand_inference_interval = int(
-            self.declare_parameter("rtmpose_hand_inference_interval", 2).value
+            self.declare_parameter("rtmpose_hand_inference_interval", 1).value
         )
         rtmpose_hand_keypoint_hold_frames = int(
-            self.declare_parameter("rtmpose_hand_keypoint_hold_frames", 2).value
+            self.declare_parameter("rtmpose_hand_keypoint_hold_frames", 0).value
+        )
+        rtmpose_hand_keypoint_tracking_threshold = float(
+            self.declare_parameter(
+                "rtmpose_hand_keypoint_tracking_threshold",
+                0.08,
+            ).value
+        )
+        rtmpose_hand_keypoint_smoothing = float(
+            self.declare_parameter("rtmpose_hand_keypoint_smoothing", 0.25).value
+        )
+        rtmpose_hand_keypoint_fast_motion_px = float(
+            self.declare_parameter(
+                "rtmpose_hand_keypoint_fast_motion_px",
+                14.0,
+            ).value
         )
         mp_hands_model_complexity = int(
             self.declare_parameter("mp_hands_model_complexity", 0).value
@@ -6149,8 +6208,14 @@ class HandPalmRm65ControlNode(Node):
                 hand_roi_wrist_extension=rtmpose_hand_roi_wrist_extension,
                 hand_roi_min_size_px=rtmpose_hand_roi_min_size_px,
                 hand_roi_max_size_px=rtmpose_hand_roi_max_size_px,
+                hand_tracking_roi_scale=rtmpose_hand_tracking_roi_scale,
                 hand_inference_interval=rtmpose_hand_inference_interval,
                 hand_keypoint_hold_frames=rtmpose_hand_keypoint_hold_frames,
+                hand_keypoint_tracking_threshold=(
+                    rtmpose_hand_keypoint_tracking_threshold
+                ),
+                hand_keypoint_smoothing=rtmpose_hand_keypoint_smoothing,
+                hand_keypoint_fast_motion_px=rtmpose_hand_keypoint_fast_motion_px,
                 logger=self.get_logger(),
             )
             self.person_selector = RTMDetDepthPersonSelector(self, self.detector)

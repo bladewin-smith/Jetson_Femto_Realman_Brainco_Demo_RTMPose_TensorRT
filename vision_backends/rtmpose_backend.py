@@ -238,8 +238,12 @@ class RTMPoseLandmarkDetector:
         hand_roi_wrist_extension: float = 0.35,
         hand_roi_min_size_px: int = 96,
         hand_roi_max_size_px: int = 420,
+        hand_tracking_roi_scale: float = 1.55,
         hand_inference_interval: int = 1,
-        hand_keypoint_hold_frames: int = 2,
+        hand_keypoint_hold_frames: int = 0,
+        hand_keypoint_tracking_threshold: float = 0.08,
+        hand_keypoint_smoothing: float = 0.25,
+        hand_keypoint_fast_motion_px: float = 14.0,
         logger: Any = None,
         runtime_impl: Any = None,
         **_ignored: Any,
@@ -290,14 +294,28 @@ class RTMPoseLandmarkDetector:
         self.hand_roi_wrist_extension = max(-0.25, min(1.5, float(hand_roi_wrist_extension)))
         self.hand_roi_min_size_px = max(32, int(hand_roi_min_size_px))
         self.hand_roi_max_size_px = max(self.hand_roi_min_size_px, int(hand_roi_max_size_px))
+        self.hand_tracking_roi_scale = max(1.1, float(hand_tracking_roi_scale))
         self.hand_inference_interval = max(1, int(hand_inference_interval))
         self.hand_keypoint_hold_frames = max(0, int(hand_keypoint_hold_frames))
+        self.hand_keypoint_tracking_threshold = max(
+            0.0,
+            min(self.hand_keypoint_threshold, float(hand_keypoint_tracking_threshold)),
+        )
+        self.hand_keypoint_smoothing = max(
+            0.0,
+            min(1.0, float(hand_keypoint_smoothing)),
+        )
+        self.hand_keypoint_fast_motion_px = max(
+            1.0,
+            float(hand_keypoint_fast_motion_px),
+        )
         self.frame_index = 0
         self.last_pose_confidences: dict[str, float] = {}
         self.last_hand_confidences: dict[str, float] = {}
         self.last_hand_keypoint_confidences: dict[str, float] = {}
         self._cached_hand_points: dict[str, tuple[int, int]] = {}
         self._hand_keypoint_cache: dict[str, tuple[tuple[int, int], int]] = {}
+        self._hand_keypoint_filter: dict[str, np.ndarray] = {}
 
     def detect_persons(self, image_bgr: np.ndarray) -> list[PersonDetection]:
         bboxes, labels = self.runtime.detect(np.ascontiguousarray(image_bgr))
@@ -331,6 +349,7 @@ class RTMPoseLandmarkDetector:
         if body is None:
             self._cached_hand_points = {}
             self._hand_keypoint_cache = {}
+            self._hand_keypoint_filter = {}
             return {}
 
         offset_x, offset_y = [int(value) for value in offset]
@@ -375,7 +394,14 @@ class RTMPoseLandmarkDetector:
             if min(float(elbow[2]), float(wrist[2])) < self.body_keypoint_threshold:
                 self._clear_hand_keypoint_cache(side)
                 continue
-            roi = self.hand_roi_from_arm(elbow[:2], wrist[:2], width, height)
+            roi = self.hand_roi_from_tracked_points(
+                side,
+                width,
+                height,
+                offset,
+            )
+            if roi is None:
+                roi = self.hand_roi_from_arm(elbow[:2], wrist[:2], width, height)
             hand = self.runtime.pose("hand", image_bgr, np.asarray([roi], np.float32))
             hand = self._first_pose(hand, expected_keypoints=21)
             if hand is None:
@@ -388,11 +414,20 @@ class RTMPoseLandmarkDetector:
                 score = float(hand[index, 2])
                 self.last_hand_keypoint_confidences[key] = score
                 coordinates = hand[index, :2]
-                if score >= self.hand_keypoint_threshold and np.all(np.isfinite(coordinates)):
-                    point = (
+                minimum_score = (
+                    self.hand_keypoint_tracking_threshold
+                    if key in self._hand_keypoint_filter
+                    else self.hand_keypoint_threshold
+                )
+                if (
+                    score >= minimum_score
+                    and np.all(np.isfinite(coordinates))
+                ):
+                    measured_point = (
                         int(round(float(coordinates[0]))) + offset_x,
                         int(round(float(coordinates[1]))) + offset_y,
                     )
+                    point = self._filter_hand_keypoint(key, measured_point)
                     output[key] = point
                     self._hand_keypoint_cache[key] = (point, self.hand_keypoint_hold_frames)
                     continue
@@ -400,6 +435,33 @@ class RTMPoseLandmarkDetector:
                 if held_point is not None:
                     output[key] = held_point
         return output
+
+    def _filter_hand_keypoint(
+        self,
+        key: str,
+        measured_point: tuple[int, int],
+    ) -> tuple[int, int]:
+        """Suppress sub-pixel jitter while releasing quickly for real motion.
+
+        A fixed EMA causes exactly the failure seen during finger flexion: a
+        fingertip can remain close to its old straight-hand position for many
+        frames.  The adaptive gain below is small for camera/model jitter and
+        reaches one for a deliberate joint displacement.
+        """
+
+        measured = np.asarray(measured_point, dtype=np.float32)
+        previous = self._hand_keypoint_filter.get(key)
+        if previous is None:
+            filtered = measured
+        else:
+            displacement = float(np.linalg.norm(measured - previous))
+            motion_ratio = min(1.0, displacement / self.hand_keypoint_fast_motion_px)
+            alpha = self.hand_keypoint_smoothing + (
+                1.0 - self.hand_keypoint_smoothing
+            ) * (motion_ratio * motion_ratio)
+            filtered = previous + alpha * (measured - previous)
+        self._hand_keypoint_filter[key] = filtered
+        return int(round(float(filtered[0]))), int(round(float(filtered[1])))
 
     def _held_hand_keypoint(self, key: str) -> tuple[int, int] | None:
         cached = self._hand_keypoint_cache.get(key)
@@ -416,6 +478,8 @@ class RTMPoseLandmarkDetector:
         prefix = f"{side}_"
         for key in [name for name in self._hand_keypoint_cache if name.startswith(prefix)]:
             self._hand_keypoint_cache.pop(key, None)
+        for key in [name for name in self._hand_keypoint_filter if name.startswith(prefix)]:
+            self._hand_keypoint_filter.pop(key, None)
 
     def hand_roi_from_arm(
         self,
@@ -430,6 +494,51 @@ class RTMPoseLandmarkDetector:
         length = max(1.0, float(np.linalg.norm(forearm)))
         center = wrist + self.hand_roi_wrist_extension * forearm
         size = int(round(np.clip(length * self.hand_roi_scale, self.hand_roi_min_size_px, self.hand_roi_max_size_px)))
+        half = 0.5 * size
+        return self._clamp_square_bbox(
+            (center[0] - half, center[1] - half, center[0] + half, center[1] + half),
+            width,
+            height,
+        )
+
+    def hand_roi_from_tracked_points(
+        self,
+        side: str,
+        width: int,
+        height: int,
+        offset: tuple[int, int] = (0, 0),
+    ) -> tuple[int, int, int, int] | None:
+        """Build a tighter next-frame ROI from the previously tracked hand.
+
+        The arm-derived ROI must be generous enough to acquire a hand, but a
+        large ROI downsamples individual fingers too aggressively at the
+        hand model's 256x256 input.  Once acquired, this tighter ROI preserves
+        index/middle-finger detail while retaining margin for real motion.
+        """
+
+        prefix = f"{side}_"
+        offset_xy = np.asarray(offset, dtype=np.float32)
+        tracked = [
+            point - offset_xy
+            for key, point in self._hand_keypoint_filter.items()
+            if key.startswith(prefix)
+        ]
+        if len(tracked) < 8:
+            return None
+        points = np.asarray(tracked, dtype=np.float32)
+        if points.ndim != 2 or points.shape[1] != 2 or not np.all(np.isfinite(points)):
+            return None
+        minimum = np.min(points, axis=0)
+        maximum = np.max(points, axis=0)
+        center = 0.5 * (minimum + maximum)
+        span = max(float(maximum[0] - minimum[0]), float(maximum[1] - minimum[1]))
+        size = float(
+            np.clip(
+                span * self.hand_tracking_roi_scale,
+                self.hand_roi_min_size_px,
+                self.hand_roi_max_size_px,
+            )
+        )
         half = 0.5 * size
         return self._clamp_square_bbox(
             (center[0] - half, center[1] - half, center[0] + half, center[1] + half),
