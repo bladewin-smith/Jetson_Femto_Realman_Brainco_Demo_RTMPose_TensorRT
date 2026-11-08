@@ -359,6 +359,268 @@ Thumb auto-zero ready: bend_baseline=..., rotate_baseline=...
 只有确认最近操作者、左右手标签、深度、手指分割线和坐标方向都稳定后，才应考虑
 开启机械臂运动。
 
+### 5. 视觉单独控制 RM65-B（当前实机最优参数组）
+
+下面记录当前实机调试得到的机械臂最优参数组。该命令启用机械臂、关闭灵巧手，使用
+低跟随 CANFD、启动/按 `s` 时六方向 IK 扫描，以及较小的单次目标变化量。启动后先
+检查 `effective_negative` 和 `effective_positive`，确认合理后再按 `s`：
+
+```bash
+cd "$REPO"
+
+python scripts/camera_arm_rm65b_control_rtmpose.py \
+  --ros-args \
+  -p vision_backend:=rtmpose \
+  -p rtmpose_runtime:=tensorrt \
+  -p rtmdet_engine_path:="$DET_ENGINE" \
+  -p rtmpose_body_engine_path:="$BODY_ENGINE" \
+  -p rtmpose_hand_engine_path:="$HAND_ENGINE" \
+  -p rtmpose_body_keypoint_threshold:=0.25 \
+  -p rtmpose_hand_keypoint_threshold:=0.25 \
+  -p rtmpose_hand_keypoint_tracking_threshold:=0.06 \
+  -p rtmpose_hand_keypoint_hold_frames:=3 \
+  -p rtmpose_hand_keypoint_smoothing:=0.18 \
+  -p rtmpose_hand_keypoint_fast_motion_px:=20.0 \
+  -p rtmpose_hand_roi_scale:=2.25 \
+  -p rtmpose_hand_roi_wrist_extension:=0.35 \
+  -p rtmpose_hand_tracking_roi_scale:=1.70 \
+  -p rtmpose_hand_roi_min_size_px:=96 \
+  -p rtmpose_hand_roi_max_size_px:=700 \
+  -p rtmpose_hand_inference_interval:=1 \
+  -p finger_segmentation_enabled:=false \
+  -p finger_segmentation_debug_overlay:=false \
+  -p finger_segmentation_fusion_enabled:=false \
+  -p control_hand_side:=right \
+  -p control_hand_fallback_enabled:=false \
+  -p operator_require_torso_pose:=true \
+  -p operator_ready_confirm_frames:=12 \
+  -p person_lost_timeout_s:=0.80 \
+  -p depth_enhancement_enabled:=false \
+  -p nn_skip_arm_angle_log:=true \
+  -p robot_motion_enabled:=true \
+  -p robot_ip:=192.168.1.18 \
+  -p robot_port:=8080 \
+  -p robot_level:=3 \
+  -p robot_thread_mode:=2 \
+  -p arm_control_protocol:=canfd \
+  -p canfd_follow:=false \
+  -p canfd_trajectory_mode:=2 \
+  -p canfd_radio:=50 \
+  -p arm_speed:=5 \
+  -p arm_block:=0 \
+  -p arm_recover_motion_state_on_start:=false \
+  -p arm_recover_motion_state_on_tracking_start:=false \
+  -p arm_slow_stop_on_pause:=true \
+  -p arm_log_command_start:=true \
+  -p auto_home_on_start:=false \
+  -p home_key_enabled:=true \
+  -p joint_safety_enabled:=true \
+  -p target_ik_safety_enabled:=true \
+  -p singularity_safety_enabled:=true \
+  -p wrist_singularity_joint5_min_abs_deg:=15.0 \
+  -p joint_limit_margin_deg:=3.0 \
+  -p target_safety_check_interval_s:=0.20 \
+  -p target_safety_allow_cached_on_read_error:=false \
+  -p arm_workspace_scan_enabled:=true \
+  -p 'arm_workspace_scan_max_distance_m:=[0.600,0.600,0.600]' \
+  -p arm_workspace_scan_step_m:=0.010 \
+  -p arm_workspace_scan_refine_iterations:=6 \
+  -p arm_workspace_scan_safety_ratio:=0.80 \
+  -p arm_workspace_scan_min_effective_m:=0.005 \
+  -p arm_state_read_retries:=5 \
+  -p arm_state_read_retry_interval_s:=0.20 \
+  -p 'camera_to_arm_matrix:=[0.0,0.0,1.0,-1.0,0.0,0.0,0.0,-1.0,0.0]' \
+  -p palm_to_arm_scale:=0.20 \
+  -p 'arm_axis_scale:=[1.2,1.6,1.2]' \
+  -p 'arm_axis_deadband_m:=[0.004,0.005,0.004]' \
+  -p hand_deadband_m:=0.006 \
+  -p palm_filter_enabled:=true \
+  -p palm_filter_alpha:=0.25 \
+  -p palm_filter_still_alpha:=0.05 \
+  -p palm_filter_hold_deadband_m:=0.008 \
+  -p palm_filter_release_deadband_m:=0.014 \
+  -p palm_filter_velocity_deadband_m_s:=0.025 \
+  -p arm_motion_unit_m:=0.001 \
+  -p 'max_arm_axis_offset_m:=[0.180,0.200,0.180]' \
+  -p 'arm_axis_max_velocity_m_s:=[0.150,0.180,0.150]' \
+  -p 'arm_axis_max_accel_m_s2:=[0.180,0.220,0.180]' \
+  -p 'max_arm_target_delta_axis_m:=[0.004,0.005,0.004]' \
+  -p min_command_delta_m:=0.0015 \
+  -p arm_command_interval_s:=0.12 \
+  -p arm_mit_control_enabled:=true \
+  -p arm_mit_kp:=35.0 \
+  -p arm_mit_kd:=16.0 \
+  -p hand_control_enabled:=false \
+  -p auto_start_on_ready:=false \
+  -p show_window:=true
+```
+
+`max_arm_axis_offset_m` 是用户硬上限，不代表当前姿态一定可以达到该距离；实际正负
+XYZ 范围仍由启动扫描结果与该参数逐轴取较小值。保持 `canfd_follow:=false`，不要在
+当前约 120 ms 的发送周期下直接切换官方高跟随模式。
+
+### 6. 视觉同时控制 RM65-B 与 BrainCo 灵巧手
+
+该命令将上一节的机械臂实机最优组，与第 4 节的逐指分割、五指标定、拇指锁定和
+BrainCo 独立 USB-RS485 参数合并。按 `s` 前保持操作者右手稳定、拇指完全绷直；按
+`s` 后继续保持至少 5 个有效识别帧，等待拇指自动归零完成：
+
+```bash
+cd "$REPO"
+
+python scripts/camera_arm_rm65b_control_rtmpose.py \
+  --ros-args \
+  -p vision_backend:=rtmpose \
+  -p rtmpose_runtime:=tensorrt \
+  -p rtmdet_engine_path:="$DET_ENGINE" \
+  -p rtmpose_body_engine_path:="$BODY_ENGINE" \
+  -p rtmpose_hand_engine_path:="$HAND_ENGINE" \
+  -p rtmpose_body_keypoint_threshold:=0.25 \
+  -p rtmpose_hand_keypoint_threshold:=0.25 \
+  -p rtmpose_hand_keypoint_tracking_threshold:=0.06 \
+  -p rtmpose_hand_keypoint_hold_frames:=3 \
+  -p rtmpose_hand_keypoint_smoothing:=0.18 \
+  -p rtmpose_hand_keypoint_fast_motion_px:=20.0 \
+  -p rtmpose_hand_roi_scale:=2.25 \
+  -p rtmpose_hand_roi_wrist_extension:=0.35 \
+  -p rtmpose_hand_tracking_roi_scale:=1.70 \
+  -p rtmpose_hand_roi_min_size_px:=96 \
+  -p rtmpose_hand_roi_max_size_px:=700 \
+  -p rtmpose_hand_inference_interval:=1 \
+  -p finger_segmentation_enabled:=true \
+  -p finger_segmentation_corridor_width_ratio:=0.08 \
+  -p finger_segmentation_color_mad_scale:=4.0 \
+  -p finger_segmentation_minimum_chroma_tolerance:=9.0 \
+  -p finger_segmentation_debug_overlay:=true \
+  -p finger_segmentation_fusion_enabled:=true \
+  -p finger_segmentation_min_confidence:=0.45 \
+  -p finger_segmentation_straight_threshold:=0.78 \
+  -p finger_segmentation_full_straight_threshold:=0.92 \
+  -p finger_segmentation_bend_cap:=0.12 \
+  -p control_hand_side:=right \
+  -p control_hand_fallback_enabled:=false \
+  -p operator_require_torso_pose:=true \
+  -p operator_ready_confirm_frames:=12 \
+  -p person_lost_timeout_s:=0.80 \
+  -p depth_enhancement_enabled:=false \
+  -p nn_skip_arm_angle_log:=true \
+  -p robot_motion_enabled:=true \
+  -p robot_ip:=192.168.1.18 \
+  -p robot_port:=8080 \
+  -p robot_level:=3 \
+  -p robot_thread_mode:=2 \
+  -p arm_control_protocol:=canfd \
+  -p canfd_follow:=false \
+  -p canfd_trajectory_mode:=2 \
+  -p canfd_radio:=50 \
+  -p arm_speed:=5 \
+  -p arm_block:=0 \
+  -p arm_recover_motion_state_on_start:=false \
+  -p arm_recover_motion_state_on_tracking_start:=false \
+  -p arm_slow_stop_on_pause:=true \
+  -p arm_log_command_start:=true \
+  -p auto_home_on_start:=false \
+  -p home_key_enabled:=true \
+  -p joint_safety_enabled:=true \
+  -p target_ik_safety_enabled:=true \
+  -p singularity_safety_enabled:=true \
+  -p wrist_singularity_joint5_min_abs_deg:=15.0 \
+  -p joint_limit_margin_deg:=3.0 \
+  -p target_safety_check_interval_s:=0.20 \
+  -p target_safety_allow_cached_on_read_error:=false \
+  -p arm_workspace_scan_enabled:=true \
+  -p 'arm_workspace_scan_max_distance_m:=[0.600,0.600,0.600]' \
+  -p arm_workspace_scan_step_m:=0.010 \
+  -p arm_workspace_scan_refine_iterations:=6 \
+  -p arm_workspace_scan_safety_ratio:=0.80 \
+  -p arm_workspace_scan_min_effective_m:=0.005 \
+  -p arm_state_read_retries:=5 \
+  -p arm_state_read_retry_interval_s:=0.20 \
+  -p 'camera_to_arm_matrix:=[0.0,0.0,1.0,-1.0,0.0,0.0,0.0,-1.0,0.0]' \
+  -p palm_to_arm_scale:=0.20 \
+  -p 'arm_axis_scale:=[1.2,1.6,1.2]' \
+  -p 'arm_axis_deadband_m:=[0.004,0.005,0.004]' \
+  -p hand_deadband_m:=0.006 \
+  -p palm_filter_enabled:=true \
+  -p palm_filter_alpha:=0.25 \
+  -p palm_filter_still_alpha:=0.05 \
+  -p palm_filter_hold_deadband_m:=0.008 \
+  -p palm_filter_release_deadband_m:=0.014 \
+  -p palm_filter_velocity_deadband_m_s:=0.025 \
+  -p arm_motion_unit_m:=0.001 \
+  -p 'max_arm_axis_offset_m:=[0.180,0.200,0.180]' \
+  -p 'arm_axis_max_velocity_m_s:=[0.150,0.180,0.150]' \
+  -p 'arm_axis_max_accel_m_s2:=[0.180,0.220,0.180]' \
+  -p 'max_arm_target_delta_axis_m:=[0.004,0.005,0.004]' \
+  -p min_command_delta_m:=0.0015 \
+  -p arm_command_interval_s:=0.12 \
+  -p arm_mit_control_enabled:=true \
+  -p arm_mit_kp:=35.0 \
+  -p arm_mit_kd:=16.0 \
+  -p hand_control_enabled:=true \
+  -p hand_transport:=brainco-rs485 \
+  -p hand_rs485_sdk_path:="$BRAINCO_SDK" \
+  -p hand_rs485_port:=auto \
+  -p hand_rs485_slave_id:=0 \
+  -p hand_rs485_baudrate:=460800 \
+  -p hand_rs485_duration_ms:=200 \
+  -p hand_rs485_speed:=300 \
+  -p hand_position_min:=0 \
+  -p hand_position_max:=1000 \
+  -p hand_bend_calibration_enabled:=true \
+  -p 'hand_bend_open_calibration:=[0.18,0.08,0.13,0.09,0.13]' \
+  -p 'hand_bend_closed_calibration:=[0.56,0.92,0.91,0.86,0.87]' \
+  -p 'hand_bend_gamma:=[1.0,1.0,1.0,1.0,1.0]' \
+  -p hand_bend_deadzone:=0.12 \
+  -p hand_bend_release_threshold:=0.05 \
+  -p hand_bend_jitter_deadband:=0.025 \
+  -p hand_send_hz:=10.0 \
+  -p hand_smoothing:=0.50 \
+  -p hand_bend_smoothing:=0.60 \
+  -p hand_bend_max_delta:=0.30 \
+  -p hand_deadband:=10 \
+  -p hand_require_3d_bends_for_control:=true \
+  -p hand_thumb_rotate_mode:=opposition \
+  -p hand_thumb_opposition_open_ratio:=1.05 \
+  -p hand_thumb_opposition_closed_ratio:=0.35 \
+  -p hand_thumb_opposition_gamma:=1.0 \
+  -p hand_thumb_rotate_scale:=0.35 \
+  -p hand_thumb_straight_lock_enabled:=true \
+  -p hand_thumb_auto_zero_enabled:=true \
+  -p hand_thumb_auto_zero_samples:=5 \
+  -p hand_thumb_auto_zero_margin:=0.05 \
+  -p hand_thumb_bend_engage_threshold:=0.25 \
+  -p hand_thumb_bend_release_threshold:=0.08 \
+  -p hand_thumb_rotate_engage_threshold:=0.32 \
+  -p hand_thumb_rotate_release_threshold:=0.12 \
+  -p hand_thumb_state_confirm_frames:=3 \
+  -p hand_thumb_jitter_deadband:=0.05 \
+  -p hand_reject_single_finger_spikes:=true \
+  -p hand_single_finger_spike_delta:=0.22 \
+  -p hand_single_finger_spike_peer_max:=0.22 \
+  -p hand_spike_confirm_frames:=2 \
+  -p hand_reject_multi_finger_spikes:=true \
+  -p hand_multi_finger_spike_delta:=0.30 \
+  -p hand_multi_finger_spike_min_count:=2 \
+  -p hand_multi_finger_spike_confirm_frames:=2 \
+  -p hand_closure_confirm_frames:=2 \
+  -p hand_closure_confirm_delta:=0.25 \
+  -p hand_closure_confirm_value:=0.45 \
+  -p hand_closure_confirm_min_fingers:=2 \
+  -p hand_open_on_start:=true \
+  -p hand_open_on_home:=true \
+  -p hand_open_on_lost:=true \
+  -p hand_lost_open_delay_s:=1.0 \
+  -p hand_open_on_exit:=true \
+  -p hand_configure_tool_voltage:=false \
+  -p auto_start_on_ready:=false \
+  -p show_window:=true
+```
+
+联合运行时，机械臂和 BrainCo 手分别使用 RealMan TCP/CANFD 与独立 USB-RS485，
+但共享视觉推理和控制手关键点。首次联合测试保持 `canfd_follow:=false`，并确保灵巧手
+串口不是 RM 工具端 RS485；按 `h` 时机械臂回 Home，同时灵巧手执行张开动作。
+
 ## 关键参数
 
 | 参数 | 默认值 | 说明 |
