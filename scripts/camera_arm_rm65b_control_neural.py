@@ -73,7 +73,7 @@ python Demo/RMDemo_Python/RMDemo_HandPalmControl/src/core/hand_palm_rm65_control
   -p robot_motion_enabled:=true \
   -p robot_ip:=192.168.1.18 \
   -p arm_control_protocol:=rs485 \
-  -p safe_home_joints:="[-2.349,-91.303,99.533,2.447,84.25,0.032]" \
+  -p safe_home_joints:="[-1.341,-91.165,101.410,-13.002,23.072,-0.046]" \
   -p arm_motion_unit_m:=0.01 \
   -p max_arm_offset_m:=0.15 \
   -p arm_speed:=10
@@ -212,7 +212,7 @@ python Demo/RMDemo_Python/RMDemo_HandPalmControl/src/core/hand_palm_rm65_control
 | `arm_slow_stop_on_pause` | `true` | Send `rm_set_arm_slow_stop` when target tracking pauses. |
 | `arm_log_command_start` | `true` | Log the exact target pose before entering the blocking RM_API motion call. Useful when diagnosing SDK stalls. |
 | `sdk_busy_log_interval_s` | `5.0` | Minimum interval for shared RM SDK busy warnings. |
-| `safe_home_joints` | `[-2.349,-91.303,99.533,2.447,84.25,0.032]` | Safe startup/home joint angles for joints 1-6, in degrees. Keep J5 away from 0 deg to avoid the RM65 wrist singularity. |
+| `safe_home_joints` | `[-1.341,-91.165,101.410,-13.002,23.072,-0.046]` | Safe startup/home joint angles for joints 1-6, in degrees. Keep J5 away from 0 deg to avoid the RM65 wrist singularity. |
 | `auto_home_on_start` | `true` | Return to `safe_home_joints` after connecting and before palm tracking controls the arm. |
 | `home_key_enabled` | `true` | Enable pressing `h` in the OpenCV window to return home. |
 | `home_speed` | `20` | Speed percentage for the safe-home `movej`. |
@@ -1942,7 +1942,7 @@ class RM65PalmFollower:
         self.safe_home_joints = self._float_list_from_param(
             node.declare_parameter(
                 "safe_home_joints",
-                [-2.349, -91.303, 99.533, 2.447, 16.05, 0.032],
+                [-1.341, -91.165, 101.410, -13.002, 23.072, -0.046],
             ).value
         )
         self.auto_home_on_start = bool(

@@ -9,14 +9,12 @@ if [[ -f "${ENV_FILE}" ]]; then
   set +a
 fi
 
-APP_ROOT="${APP_ROOT:-/home/jetson/ws/rm_brainco_orbbec_demo}"
+APP_ROOT="${APP_ROOT:-/home/jetson/ws/Jetson_Femto_Realman_Brainco_Demo_RTMPose_TensorRT}"
+CONTROL_SCRIPT="${CONTROL_SCRIPT:-${APP_ROOT}/scripts/camera_arm_rm65b_control_rtmpose.py}"
 PYTHON_BIN="${PYTHON_BIN:-/usr/bin/python3}"
 ROS_SETUP="${ROS_SETUP:-/opt/ros/humble/setup.bash}"
-CONTROL_SCRIPT="${CONTROL_SCRIPT:-}"
 
-log() {
-  printf '[rm_brainco_orbbec_demo] %s\n' "$*"
-}
+log() { printf '[rm_brainco_orbbec_demo] %s\n' "$*"; }
 
 bool_is_true() {
   case "${1:-false}" in
@@ -26,18 +24,12 @@ bool_is_true() {
 }
 
 wait_for_ping() {
-  local host="$1"
-  local timeout_s="${2:-30}"
-  local start
-  local now
+  local host="$1" timeout_s="${2:-45}" start now
   start="$(date +%s)"
-  while true; do
-    if ping -c 1 -W 1 "${host}" >/dev/null 2>&1; then
-      return 0
-    fi
+  while ! ping -c 1 -W 1 "${host}" >/dev/null 2>&1; do
     now="$(date +%s)"
     if (( now - start >= timeout_s )); then
-      log "Timed out waiting for ${host}"
+      log "Timed out waiting for robot at ${host}"
       return 1
     fi
     sleep 1
@@ -45,15 +37,9 @@ wait_for_ping() {
 }
 
 wait_for_path() {
-  local path="$1"
-  local timeout_s="${2:-20}"
-  local start
-  local now
+  local path="$1" timeout_s="${2:-20}" start now
   start="$(date +%s)"
-  while true; do
-    if [[ -e "${path}" ]]; then
-      return 0
-    fi
+  while [[ ! -e "${path}" ]]; do
     now="$(date +%s)"
     if (( now - start >= timeout_s )); then
       log "Timed out waiting for ${path}"
@@ -70,31 +56,7 @@ if [[ -f "${ROS_SETUP}" ]]; then
   set -u
 else
   log "ROS setup file not found: ${ROS_SETUP}"
-fi
-
-if [[ -n "${CONDA_ENV:-}" && -f "${CONDA_SH:-}" ]]; then
-  set +u
-  # shellcheck disable=SC1090
-  source "${CONDA_SH}"
-  conda activate "${CONDA_ENV}"
-  set -u
-elif [[ -n "${VENV_ACTIVATE:-}" && -f "${VENV_ACTIVATE}" ]]; then
-  set +u
-  # shellcheck disable=SC1090
-  source "${VENV_ACTIVATE}"
-  set -u
-fi
-
-if [[ -z "${CONTROL_SCRIPT}" ]]; then
-  if [[ -f "${APP_ROOT}/scripts/camera_arm_rm65b_control_rtmpose.py" ]]; then
-    CONTROL_SCRIPT="${APP_ROOT}/scripts/camera_arm_rm65b_control_rtmpose.py"
-  elif [[ -f "${APP_ROOT}/scripts/camera_arm_rm65b_control_pose_hands.py" ]]; then
-    CONTROL_SCRIPT="${APP_ROOT}/scripts/camera_arm_rm65b_control_pose_hands.py"
-  elif [[ -f "${APP_ROOT}/scripts/camera_arm_rm65b_control_neural.py" ]]; then
-    CONTROL_SCRIPT="${APP_ROOT}/scripts/camera_arm_rm65b_control_neural.py"
-  else
-    CONTROL_SCRIPT="${APP_ROOT}/camera_arm_rm65b_control_neural.py"
-  fi
+  exit 2
 fi
 
 if [[ ! -f "${CONTROL_SCRIPT}" ]]; then
@@ -102,167 +64,201 @@ if [[ ! -f "${CONTROL_SCRIPT}" ]]; then
   exit 2
 fi
 
+for model_path in \
+  "${RTMDET_ENGINE_PATH:-}" \
+  "${RTMPOSE_BODY_ENGINE_PATH:-}" \
+  "${RTMPOSE_HAND_ENGINE_PATH:-}"; do
+  if [[ -z "${model_path}" || ! -f "${model_path}" ]]; then
+    log "TensorRT engine not found: ${model_path:-<empty>}"
+    exit 2
+  fi
+done
+
 export PYTHONUNBUFFERED=1
 export RCUTILS_LOGGING_BUFFERED_STREAM=1
-export PYTHONPATH="${EXTRA_PYTHONPATH:-}:${RM_API2_PYTHON_PATH:-}:${BRAINCO_HAND_SDK_PATH:-}:${LINGBOT_DEPTH_REPO_PATH:-}:${APP_ROOT}:${PYTHONPATH:-}"
+export PYTHONPATH="${EXTRA_PYTHONPATH:-}:${BRAINCO_HAND_SDK_PATH:-}:${APP_ROOT}:${APP_ROOT}/scripts:${PYTHONPATH:-}"
 
 cd "${APP_ROOT}"
 
-if bool_is_true "${WAIT_FOR_ROBOT_IP:-true}" && bool_is_true "${ROBOT_MOTION_ENABLED:-false}"; then
+if bool_is_true "${WAIT_FOR_ROBOT_IP:-true}" && bool_is_true "${ROBOT_MOTION_ENABLED:-true}"; then
   wait_for_ping "${ROBOT_IP:-192.168.1.18}" "${WAIT_FOR_ROBOT_TIMEOUT_S:-45}"
 fi
 
-if bool_is_true "${WAIT_FOR_HAND_RS485_PORT:-true}" && [[ "${HAND_TRANSPORT:-}" == "brainco-rs485" && "${HAND_RS485_PORT:-auto}" != "auto" ]]; then
-  wait_for_path "${HAND_RS485_PORT:-/dev/ttyUSB0}" "${WAIT_FOR_HAND_RS485_TIMEOUT_S:-20}"
+if bool_is_true "${WAIT_FOR_HAND_RS485_PORT:-false}" \
+  && [[ "${HAND_TRANSPORT:-brainco-rs485}" == "brainco-rs485" ]] \
+  && [[ "${HAND_RS485_PORT:-auto}" != "auto" ]]; then
+  wait_for_path "${HAND_RS485_PORT}" "${WAIT_FOR_HAND_RS485_TIMEOUT_S:-20}"
 fi
 
-ARGS=(
-  "${CONTROL_SCRIPT}"
-  "--ros-args"
-  "-p" "show_window:=${SHOW_WINDOW:-false}"
-  "-p" "display_max_width:=${DISPLAY_MAX_WIDTH:-960}"
-  "-p" "display_max_height:=${DISPLAY_MAX_HEIGHT:-540}"
-  "-p" "auto_start_on_ready:=${AUTO_START_ON_READY:-false}"
-  "-p" "auto_start_delay_s:=${AUTO_START_DELAY_S:-1.0}"
-  "-p" "robot_motion_enabled:=${ROBOT_MOTION_ENABLED:-true}"
-  "-p" "robot_ip:=${ROBOT_IP:-192.168.1.18}"
-  "-p" "robot_port:=${ROBOT_PORT:-8080}"
-  "-p" "arm_control_protocol:=${ARM_CONTROL_PROTOCOL:-canfd}"
-  "-p" "canfd_follow:=${CANFD_FOLLOW:-false}"
-  "-p" "canfd_trajectory_mode:=${CANFD_TRAJECTORY_MODE:-2}"
-  "-p" "canfd_radio:=${CANFD_RADIO:-50}"
-  "-p" "arm_command_interval_s:=${ARM_COMMAND_INTERVAL_S:-0.03}"
-  "-p" "arm_motion_unit_m:=${ARM_MOTION_UNIT_M:-0.002}"
-  "-p" "max_arm_target_delta_m:=${MAX_ARM_TARGET_DELTA_M:-0.008}"
-  "-p" "min_command_delta_m:=${MIN_COMMAND_DELTA_M:-0.0015}"
-  "-p" "arm_block:=${ARM_BLOCK:-0}"
-  "-p" "max_arm_offset_m:=${MAX_ARM_OFFSET_M:-0.08}"
-  "-p" "arm_mit_control_enabled:=${ARM_MIT_CONTROL_ENABLED:-true}"
-  "-p" "arm_mit_kp:=${ARM_MIT_KP:-70.0}"
-  "-p" "arm_mit_kd:=${ARM_MIT_KD:-16.0}"
-  "-p" "arm_mit_max_velocity_m_s:=${ARM_MIT_MAX_VELOCITY_M_S:-0.22}"
-  "-p" "arm_mit_max_accel_m_s2:=${ARM_MIT_MAX_ACCEL_M_S2:-1.5}"
-  "-p" "hand_control_enabled:=${HAND_CONTROL_ENABLED:-true}"
-  "-p" "hand_transport:=${HAND_TRANSPORT:-brainco-rs485}"
-  "-p" "hand_rs485_sdk_path:=${BRAINCO_HAND_SDK_PATH:-/home/jetson/ws/brainco-hand-sdk-main/python}"
-  "-p" "hand_rs485_port:=${HAND_RS485_PORT:-/dev/ttyUSB0}"
-  "-p" "hand_rs485_slave_id:=${HAND_RS485_SLAVE_ID:-127}"
-  "-p" "hand_rs485_baudrate:=${HAND_RS485_BAUDRATE:-460800}"
-  "-p" "hand_rs485_duration_ms:=${HAND_RS485_DURATION_MS:-40}"
-  "-p" "hand_rs485_speed:=${HAND_RS485_SPEED:-1000}"
-  "-p" "hand_wait_for_first_arm_command:=${HAND_WAIT_FOR_FIRST_ARM_COMMAND:-false}"
-  "-p" "hand_pause_while_arm_sdk_busy:=${HAND_PAUSE_WHILE_ARM_SDK_BUSY:-false}"
-  "-p" "hand_configure_tool_voltage:=${HAND_CONFIGURE_TOOL_VOLTAGE:-true}"
-  "-p" "hand_tool_voltage_type:=${HAND_TOOL_VOLTAGE_TYPE:-3}"
-  "-p" "hand_send_hz:=${HAND_SEND_HZ:-40.0}"
-  "-p" "hand_smoothing:=${HAND_SMOOTHING:-0.75}"
-  "-p" "hand_bend_smoothing:=${HAND_BEND_SMOOTHING:-0.55}"
-  "-p" "hand_bend_deadzone:=${HAND_BEND_DEADZONE:-0.10}"
-  "-p" "hand_bend_release_threshold:=${HAND_BEND_RELEASE_THRESHOLD:-0.04}"
-  "-p" "hand_bend_jitter_deadband:=${HAND_BEND_JITTER_DEADBAND:-0.025}"
-  "-p" "hand_bend_calibration_enabled:=${HAND_BEND_CALIBRATION_ENABLED:-true}"
-  "-p" "hand_bend_open_calibration:=${HAND_BEND_OPEN_CALIBRATION:-[0.18,0.08,0.13,0.09,0.13]}"
-  "-p" "hand_bend_closed_calibration:=${HAND_BEND_CLOSED_CALIBRATION:-[0.56,0.92,0.91,0.86,0.87]}"
-  "-p" "hand_bend_gamma:=${HAND_BEND_GAMMA:-[1.0,1.0,1.0,1.0,1.0]}"
-  "-p" "hand_thumb_rotate_mode:=${HAND_THUMB_ROTATE_MODE:-opposition}"
-  "-p" "hand_thumb_rotate_scale:=${HAND_THUMB_ROTATE_SCALE:-0.35}"
-  "-p" "hand_thumb_opposition_open_ratio:=${HAND_THUMB_OPPOSITION_OPEN_RATIO:-1.05}"
-  "-p" "hand_thumb_opposition_closed_ratio:=${HAND_THUMB_OPPOSITION_CLOSED_RATIO:-0.35}"
-  "-p" "hand_thumb_opposition_gamma:=${HAND_THUMB_OPPOSITION_GAMMA:-1.0}"
-  "-p" "hand_thumb_straight_lock_enabled:=${HAND_THUMB_STRAIGHT_LOCK_ENABLED:-true}"
-  "-p" "hand_thumb_auto_zero_enabled:=${HAND_THUMB_AUTO_ZERO_ENABLED:-true}"
-  "-p" "hand_thumb_auto_zero_samples:=${HAND_THUMB_AUTO_ZERO_SAMPLES:-5}"
-  "-p" "hand_thumb_auto_zero_margin:=${HAND_THUMB_AUTO_ZERO_MARGIN:-0.04}"
-  "-p" "hand_thumb_bend_engage_threshold:=${HAND_THUMB_BEND_ENGAGE_THRESHOLD:-0.22}"
-  "-p" "hand_thumb_bend_release_threshold:=${HAND_THUMB_BEND_RELEASE_THRESHOLD:-0.08}"
-  "-p" "hand_thumb_rotate_engage_threshold:=${HAND_THUMB_ROTATE_ENGAGE_THRESHOLD:-0.30}"
-  "-p" "hand_thumb_rotate_release_threshold:=${HAND_THUMB_ROTATE_RELEASE_THRESHOLD:-0.12}"
-  "-p" "hand_thumb_state_confirm_frames:=${HAND_THUMB_STATE_CONFIRM_FRAMES:-3}"
-  "-p" "hand_thumb_jitter_deadband:=${HAND_THUMB_JITTER_DEADBAND:-0.04}"
-  "-p" "hand_closure_confirm_frames:=${HAND_CLOSURE_CONFIRM_FRAMES:-3}"
-  "-p" "hand_spike_confirm_frames:=${HAND_SPIKE_CONFIRM_FRAMES:-2}"
-  "-p" "hand_multi_finger_spike_confirm_frames:=${HAND_MULTI_FINGER_SPIKE_CONFIRM_FRAMES:-3}"
-  "-p" "finger_segmentation_fusion_enabled:=${FINGER_SEGMENTATION_FUSION_ENABLED:-true}"
-  "-p" "finger_segmentation_min_confidence:=${FINGER_SEGMENTATION_MIN_CONFIDENCE:-0.45}"
-  "-p" "finger_segmentation_straight_threshold:=${FINGER_SEGMENTATION_STRAIGHT_THRESHOLD:-0.78}"
-  "-p" "finger_segmentation_full_straight_threshold:=${FINGER_SEGMENTATION_FULL_STRAIGHT_THRESHOLD:-0.92}"
-  "-p" "finger_segmentation_bend_cap:=${FINGER_SEGMENTATION_BEND_CAP:-0.12}"
-  "-p" "color_width:=${COLOR_WIDTH:-1280}"
-  "-p" "color_height:=${COLOR_HEIGHT:-720}"
-  "-p" "color_fps:=${COLOR_FPS:-30}"
-  "-p" "depth_width:=${DEPTH_WIDTH:-0}"
-  "-p" "depth_height:=${DEPTH_HEIGHT:-0}"
-  "-p" "depth_fps:=${DEPTH_FPS:-0}"
-  "-p" "vision_backend:=${VISION_BACKEND:-rtmpose}"
-  "-p" "rtmpose_runtime:=${RTMPOSE_RUNTIME:-tensorrt}"
-  "-p" "rtmpose_device_name:=${RTMPOSE_DEVICE_NAME:-cuda}"
-  "-p" "rtmpose_device_id:=${RTMPOSE_DEVICE_ID:-0}"
-  "-p" "rtmdet_engine_path:=${RTMDET_ENGINE_PATH:-${APP_ROOT}/models/tensorrt/rtmdet_nano.engine}"
-  "-p" "rtmpose_body_engine_path:=${RTMPOSE_BODY_ENGINE_PATH:-${APP_ROOT}/models/tensorrt/rtmpose_body.engine}"
-  "-p" "rtmpose_hand_engine_path:=${RTMPOSE_HAND_ENGINE_PATH:-${APP_ROOT}/models/tensorrt/rtmpose_hand.engine}"
-  "-p" "rtmdet_model_dir:=${RTMDET_MODEL_DIR:-${APP_ROOT}/models/mmdeploy/rtmdet_nano}"
-  "-p" "rtmpose_body_model_dir:=${RTMPOSE_BODY_MODEL_DIR:-${APP_ROOT}/models/mmdeploy/rtmpose_body}"
-  "-p" "rtmpose_hand_model_dir:=${RTMPOSE_HAND_MODEL_DIR:-${APP_ROOT}/models/mmdeploy/rtmpose_hand}"
-  "-p" "rtmdet_nms_iou_threshold:=${RTMDET_NMS_IOU_THRESHOLD:-0.60}"
-  "-p" "rtmdet_max_detections:=${RTMDET_MAX_DETECTIONS:-100}"
-  "-p" "rtmpose_bbox_padding:=${RTMPOSE_BBOX_PADDING:-1.25}"
-  "-p" "rtmdet_inference_hz:=${RTMDET_INFERENCE_HZ:-8.0}"
-  "-p" "rtmpose_person_score_threshold:=${RTMPOSE_PERSON_SCORE_THRESHOLD:-0.45}"
-  "-p" "rtmpose_body_keypoint_threshold:=${RTMPOSE_BODY_KEYPOINT_THRESHOLD:-0.35}"
-  "-p" "rtmpose_hand_keypoint_threshold:=${RTMPOSE_HAND_KEYPOINT_THRESHOLD:-0.25}"
-  "-p" "rtmpose_hand_roi_scale:=${RTMPOSE_HAND_ROI_SCALE:-2.25}"
-  "-p" "rtmpose_hand_roi_wrist_extension:=${RTMPOSE_HAND_ROI_WRIST_EXTENSION:-0.35}"
-  "-p" "rtmpose_hand_tracking_roi_scale:=${RTMPOSE_HAND_TRACKING_ROI_SCALE:-1.55}"
-  "-p" "rtmpose_hand_inference_interval:=${RTMPOSE_HAND_INFERENCE_INTERVAL:-1}"
-  "-p" "rtmpose_hand_keypoint_hold_frames:=${RTMPOSE_HAND_KEYPOINT_HOLD_FRAMES:-0}"
-  "-p" "rtmpose_hand_keypoint_tracking_threshold:=${RTMPOSE_HAND_KEYPOINT_TRACKING_THRESHOLD:-0.08}"
-  "-p" "rtmpose_hand_keypoint_smoothing:=${RTMPOSE_HAND_KEYPOINT_SMOOTHING:-0.25}"
-  "-p" "rtmpose_hand_keypoint_fast_motion_px:=${RTMPOSE_HAND_KEYPOINT_FAST_MOTION_PX:-14.0}"
-  "-p" "finger_segmentation_enabled:=${FINGER_SEGMENTATION_ENABLED:-true}"
-  "-p" "finger_segmentation_corridor_width_ratio:=${FINGER_SEGMENTATION_CORRIDOR_WIDTH_RATIO:-0.11}"
-  "-p" "finger_segmentation_color_mad_scale:=${FINGER_SEGMENTATION_COLOR_MAD_SCALE:-4.0}"
-  "-p" "finger_segmentation_minimum_chroma_tolerance:=${FINGER_SEGMENTATION_MINIMUM_CHROMA_TOLERANCE:-9.0}"
-  "-p" "finger_segmentation_debug_overlay:=${FINGER_SEGMENTATION_DEBUG_OVERLAY:-true}"
-  "-p" "mp_hands_model_complexity:=${MP_HANDS_MODEL_COMPLEXITY:-0}"
-  "-p" "mp_pose_enabled:=${MP_POSE_ENABLED:-true}"
-  "-p" "mp_pose_backend:=${MP_POSE_BACKEND:-auto}"
-  "-p" "mp_pose_model_complexity:=${MP_POSE_MODEL_COMPLEXITY:-0}"
-  "-p" "mp_max_num_hands:=${MP_MAX_NUM_HANDS:-2}"
-  "-p" "mp_associate_hands_to_pose:=${MP_ASSOCIATE_HANDS_TO_POSE:-true}"
-  "-p" "mp_hand_assignment_max_distance_ratio:=${MP_HAND_ASSIGNMENT_MAX_DISTANCE_RATIO:-0.35}"
-  "-p" "mp_handedness_swap:=${MP_HANDEDNESS_SWAP:-false}"
-  "-p" "control_hand_side:=${CONTROL_HAND_SIDE:-right}"
-  "-p" "control_hand_fallback_enabled:=${CONTROL_HAND_FALLBACK_ENABLED:-false}"
-  "-p" "landmark_depth_patch_radius_px:=${LANDMARK_DEPTH_PATCH_RADIUS_PX:-2}"
-  "-p" "landmark_depth_min_valid_samples:=${LANDMARK_DEPTH_MIN_VALID_SAMPLES:-3}"
-  "-p" "operator_require_torso_pose:=${OPERATOR_REQUIRE_TORSO_POSE:-true}"
-  "-p" "operator_max_candidate_tests:=${OPERATOR_MAX_CANDIDATE_TESTS:-1}"
-  "-p" "operator_torso_depth_patch_radius_px:=${OPERATOR_TORSO_DEPTH_PATCH_RADIUS_PX:-6}"
-  "-p" "operator_torso_depth_min_valid_samples:=${OPERATOR_TORSO_DEPTH_MIN_VALID_SAMPLES:-5}"
-  "-p" "operator_torso_min_landmarks:=${OPERATOR_TORSO_MIN_LANDMARKS:-2}"
-  "-p" "operator_ready_confirm_frames:=${OPERATOR_READY_CONFIRM_FRAMES:-5}"
-  "-p" "operator_ready_max_depth_jump_m:=${OPERATOR_READY_MAX_DEPTH_JUMP_M:-0.25}"
-  "-p" "operator_ready_max_center_jump_px:=${OPERATOR_READY_MAX_CENTER_JUMP_PX:-160.0}"
-  "-p" "mp_detection_confidence:=${MP_DETECTION_CONFIDENCE:-0.65}"
-  "-p" "mp_tracking_confidence:=${MP_TRACKING_CONFIDENCE:-0.65}"
-  "-p" "nn_inference_resize_enabled:=${NN_INFERENCE_RESIZE_ENABLED:-true}"
-  "-p" "nn_inference_max_side_px:=${NN_INFERENCE_MAX_SIDE_PX:-384}"
-  "-p" "nn_skip_arm_angle_log:=${NN_SKIP_ARM_ANGLE_LOG:-true}"
-  "-p" "depth_enhancement_enabled:=${DEPTH_ENHANCEMENT_ENABLED:-false}"
-  "-p" "depth_enhancement_backend:=${DEPTH_ENHANCEMENT_BACKEND:-filter}"
-  "-p" "lingbot_depth_repo_path:=${LINGBOT_DEPTH_REPO_PATH:-/home/jetson/ws/lingbot-depth}"
-  "-p" "lingbot_depth_model_path:=${LINGBOT_DEPTH_MODEL_PATH:-/home/jetson/ws/lingbot-depth/model.pt}"
-  "-p" "lingbot_depth_device:=${LINGBOT_DEPTH_DEVICE:-cuda}"
-  "-p" "lingbot_depth_max_hz:=${LINGBOT_DEPTH_MAX_HZ:-3.0}"
-  "-p" "lingbot_depth_model_max_side_px:=${LINGBOT_DEPTH_MODEL_MAX_SIDE_PX:-384}"
-  "-p" "lingbot_depth_mixed_precision:=${LINGBOT_DEPTH_MIXED_PRECISION:-false}"
-  "-p" "depth_enhancement_blend_alpha:=${DEPTH_ENHANCEMENT_BLEND_ALPHA:-0.65}"
-  "-p" "depth_enhancement_temporal_alpha:=${DEPTH_ENHANCEMENT_TEMPORAL_ALPHA:-0.45}"
-)
+ARGS=("${CONTROL_SCRIPT}" "--ros-args")
+add_param() { ARGS+=("-p" "$1:=$2"); }
 
-if [[ -n "${MP_POSE_TASK_MODEL_PATH:-}" ]]; then
-  ARGS+=("-p" "mp_pose_task_model_path:=${MP_POSE_TASK_MODEL_PATH}")
-fi
+add_param vision_backend "${VISION_BACKEND:-rtmpose}"
+add_param rtmpose_runtime "${RTMPOSE_RUNTIME:-tensorrt}"
+add_param rtmpose_device_name "${RTMPOSE_DEVICE_NAME:-cuda}"
+add_param rtmpose_device_id "${RTMPOSE_DEVICE_ID:-0}"
+add_param rtmdet_engine_path "${RTMDET_ENGINE_PATH}"
+add_param rtmpose_body_engine_path "${RTMPOSE_BODY_ENGINE_PATH}"
+add_param rtmpose_hand_engine_path "${RTMPOSE_HAND_ENGINE_PATH}"
+add_param rtmpose_body_keypoint_threshold "${RTMPOSE_BODY_KEYPOINT_THRESHOLD:-0.25}"
+add_param rtmpose_hand_keypoint_threshold "${RTMPOSE_HAND_KEYPOINT_THRESHOLD:-0.25}"
+add_param rtmpose_hand_keypoint_tracking_threshold "${RTMPOSE_HAND_KEYPOINT_TRACKING_THRESHOLD:-0.06}"
+add_param rtmpose_hand_keypoint_hold_frames "${RTMPOSE_HAND_KEYPOINT_HOLD_FRAMES:-3}"
+add_param rtmpose_hand_keypoint_smoothing "${RTMPOSE_HAND_KEYPOINT_SMOOTHING:-0.18}"
+add_param rtmpose_hand_keypoint_fast_motion_px "${RTMPOSE_HAND_KEYPOINT_FAST_MOTION_PX:-20.0}"
+add_param rtmpose_hand_roi_scale "${RTMPOSE_HAND_ROI_SCALE:-2.25}"
+add_param rtmpose_hand_roi_wrist_extension "${RTMPOSE_HAND_ROI_WRIST_EXTENSION:-0.35}"
+add_param rtmpose_hand_tracking_roi_scale "${RTMPOSE_HAND_TRACKING_ROI_SCALE:-1.70}"
+add_param rtmpose_hand_roi_min_size_px "${RTMPOSE_HAND_ROI_MIN_SIZE_PX:-96}"
+add_param rtmpose_hand_roi_max_size_px "${RTMPOSE_HAND_ROI_MAX_SIZE_PX:-700}"
+add_param rtmpose_hand_inference_interval "${RTMPOSE_HAND_INFERENCE_INTERVAL:-1}"
+
+add_param finger_segmentation_enabled "${FINGER_SEGMENTATION_ENABLED:-true}"
+add_param finger_segmentation_corridor_width_ratio "${FINGER_SEGMENTATION_CORRIDOR_WIDTH_RATIO:-0.08}"
+add_param finger_segmentation_color_mad_scale "${FINGER_SEGMENTATION_COLOR_MAD_SCALE:-4.0}"
+add_param finger_segmentation_minimum_chroma_tolerance "${FINGER_SEGMENTATION_MINIMUM_CHROMA_TOLERANCE:-9.0}"
+add_param finger_segmentation_debug_overlay "${FINGER_SEGMENTATION_DEBUG_OVERLAY:-true}"
+add_param finger_segmentation_fusion_enabled "${FINGER_SEGMENTATION_FUSION_ENABLED:-true}"
+add_param finger_segmentation_min_confidence "${FINGER_SEGMENTATION_MIN_CONFIDENCE:-0.45}"
+add_param finger_segmentation_straight_threshold "${FINGER_SEGMENTATION_STRAIGHT_THRESHOLD:-0.78}"
+add_param finger_segmentation_full_straight_threshold "${FINGER_SEGMENTATION_FULL_STRAIGHT_THRESHOLD:-0.92}"
+add_param finger_segmentation_bend_cap "${FINGER_SEGMENTATION_BEND_CAP:-0.12}"
+
+add_param control_hand_side "${CONTROL_HAND_SIDE:-right}"
+add_param control_hand_fallback_enabled "${CONTROL_HAND_FALLBACK_ENABLED:-false}"
+add_param operator_require_torso_pose "${OPERATOR_REQUIRE_TORSO_POSE:-true}"
+add_param operator_ready_confirm_frames "${OPERATOR_READY_CONFIRM_FRAMES:-12}"
+add_param person_lost_timeout_s "${PERSON_LOST_TIMEOUT_S:-0.80}"
+add_param depth_enhancement_enabled "${DEPTH_ENHANCEMENT_ENABLED:-false}"
+add_param nn_skip_arm_angle_log "${NN_SKIP_ARM_ANGLE_LOG:-true}"
+
+add_param robot_motion_enabled "${ROBOT_MOTION_ENABLED:-true}"
+add_param robot_ip "${ROBOT_IP:-192.168.1.18}"
+add_param robot_port "${ROBOT_PORT:-8080}"
+add_param robot_level "${ROBOT_LEVEL:-3}"
+add_param robot_thread_mode "${ROBOT_THREAD_MODE:-2}"
+add_param arm_control_protocol "${ARM_CONTROL_PROTOCOL:-canfd}"
+add_param canfd_follow "${CANFD_FOLLOW:-false}"
+add_param canfd_trajectory_mode "${CANFD_TRAJECTORY_MODE:-2}"
+add_param canfd_radio "${CANFD_RADIO:-50}"
+add_param arm_speed "${ARM_SPEED:-5}"
+add_param arm_block "${ARM_BLOCK:-0}"
+add_param arm_recover_motion_state_on_start "${ARM_RECOVER_MOTION_STATE_ON_START:-false}"
+add_param arm_recover_motion_state_on_tracking_start "${ARM_RECOVER_MOTION_STATE_ON_TRACKING_START:-false}"
+add_param arm_slow_stop_on_pause "${ARM_SLOW_STOP_ON_PAUSE:-true}"
+add_param arm_log_command_start "${ARM_LOG_COMMAND_START:-true}"
+add_param auto_home_on_start "${AUTO_HOME_ON_START:-false}"
+add_param home_key_enabled "${HOME_KEY_ENABLED:-true}"
+add_param safe_home_joints "${SAFE_HOME_JOINTS:-[-1.341,-91.165,101.410,-13.002,23.072,-0.046]}"
+add_param joint_safety_enabled "${JOINT_SAFETY_ENABLED:-true}"
+add_param target_ik_safety_enabled "${TARGET_IK_SAFETY_ENABLED:-true}"
+add_param singularity_safety_enabled "${SINGULARITY_SAFETY_ENABLED:-true}"
+add_param wrist_singularity_joint5_min_abs_deg "${WRIST_SINGULARITY_JOINT5_MIN_ABS_DEG:-15.0}"
+add_param joint_limit_margin_deg "${JOINT_LIMIT_MARGIN_DEG:-3.0}"
+add_param target_safety_check_interval_s "${TARGET_SAFETY_CHECK_INTERVAL_S:-0.20}"
+add_param target_safety_allow_cached_on_read_error "${TARGET_SAFETY_ALLOW_CACHED_ON_READ_ERROR:-false}"
+
+add_param arm_workspace_scan_enabled "${ARM_WORKSPACE_SCAN_ENABLED:-true}"
+add_param arm_workspace_scan_max_distance_m "${ARM_WORKSPACE_SCAN_MAX_DISTANCE_M:-[0.600,0.600,0.600]}"
+add_param arm_workspace_scan_step_m "${ARM_WORKSPACE_SCAN_STEP_M:-0.010}"
+add_param arm_workspace_scan_refine_iterations "${ARM_WORKSPACE_SCAN_REFINE_ITERATIONS:-6}"
+add_param arm_workspace_scan_safety_ratio "${ARM_WORKSPACE_SCAN_SAFETY_RATIO:-0.80}"
+add_param arm_workspace_scan_min_effective_m "${ARM_WORKSPACE_SCAN_MIN_EFFECTIVE_M:-0.005}"
+add_param arm_state_read_retries "${ARM_STATE_READ_RETRIES:-5}"
+add_param arm_state_read_retry_interval_s "${ARM_STATE_READ_RETRY_INTERVAL_S:-0.20}"
+
+add_param camera_to_arm_matrix "${CAMERA_TO_ARM_MATRIX:-[0.0,0.0,1.0,-1.0,0.0,0.0,0.0,-1.0,0.0]}"
+add_param palm_to_arm_scale "${PALM_TO_ARM_SCALE:-0.20}"
+add_param arm_axis_scale "${ARM_AXIS_SCALE:-[1.2,1.6,1.2]}"
+add_param arm_axis_deadband_m "${ARM_AXIS_DEADBAND_M:-[0.004,0.005,0.004]}"
+add_param hand_deadband_m "${HAND_DEADBAND_M:-0.006}"
+add_param palm_filter_enabled "${PALM_FILTER_ENABLED:-true}"
+add_param palm_filter_alpha "${PALM_FILTER_ALPHA:-0.25}"
+add_param palm_filter_still_alpha "${PALM_FILTER_STILL_ALPHA:-0.05}"
+add_param palm_filter_hold_deadband_m "${PALM_FILTER_HOLD_DEADBAND_M:-0.008}"
+add_param palm_filter_release_deadband_m "${PALM_FILTER_RELEASE_DEADBAND_M:-0.014}"
+add_param palm_filter_velocity_deadband_m_s "${PALM_FILTER_VELOCITY_DEADBAND_M_S:-0.025}"
+add_param arm_motion_unit_m "${ARM_MOTION_UNIT_M:-0.001}"
+add_param max_arm_axis_offset_m "${MAX_ARM_AXIS_OFFSET_M:-[0.180,0.200,0.180]}"
+add_param arm_axis_max_velocity_m_s "${ARM_AXIS_MAX_VELOCITY_M_S:-[0.150,0.180,0.150]}"
+add_param arm_axis_max_accel_m_s2 "${ARM_AXIS_MAX_ACCEL_M_S2:-[0.180,0.220,0.180]}"
+add_param max_arm_target_delta_axis_m "${MAX_ARM_TARGET_DELTA_AXIS_M:-[0.004,0.005,0.004]}"
+add_param min_command_delta_m "${MIN_COMMAND_DELTA_M:-0.0015}"
+add_param arm_command_interval_s "${ARM_COMMAND_INTERVAL_S:-0.12}"
+add_param arm_mit_control_enabled "${ARM_MIT_CONTROL_ENABLED:-true}"
+add_param arm_mit_kp "${ARM_MIT_KP:-35.0}"
+add_param arm_mit_kd "${ARM_MIT_KD:-16.0}"
+
+add_param hand_control_enabled "${HAND_CONTROL_ENABLED:-true}"
+add_param hand_transport "${HAND_TRANSPORT:-brainco-rs485}"
+add_param hand_rs485_sdk_path "${BRAINCO_HAND_SDK_PATH:-/home/jetson/ws/brainco-hand-sdk-main/python}"
+add_param hand_rs485_port "${HAND_RS485_PORT:-auto}"
+add_param hand_rs485_slave_id "${HAND_RS485_SLAVE_ID:-0}"
+add_param hand_rs485_baudrate "${HAND_RS485_BAUDRATE:-460800}"
+add_param hand_rs485_duration_ms "${HAND_RS485_DURATION_MS:-200}"
+add_param hand_rs485_speed "${HAND_RS485_SPEED:-300}"
+add_param hand_position_min "${HAND_POSITION_MIN:-0}"
+add_param hand_position_max "${HAND_POSITION_MAX:-1000}"
+add_param hand_bend_calibration_enabled "${HAND_BEND_CALIBRATION_ENABLED:-true}"
+add_param hand_bend_open_calibration "${HAND_BEND_OPEN_CALIBRATION:-[0.18,0.08,0.13,0.09,0.13]}"
+add_param hand_bend_closed_calibration "${HAND_BEND_CLOSED_CALIBRATION:-[0.56,0.92,0.91,0.86,0.87]}"
+add_param hand_bend_gamma "${HAND_BEND_GAMMA:-[1.0,1.0,1.0,1.0,1.0]}"
+add_param hand_bend_deadzone "${HAND_BEND_DEADZONE:-0.12}"
+add_param hand_bend_release_threshold "${HAND_BEND_RELEASE_THRESHOLD:-0.05}"
+add_param hand_bend_jitter_deadband "${HAND_BEND_JITTER_DEADBAND:-0.025}"
+add_param hand_send_hz "${HAND_SEND_HZ:-10.0}"
+add_param hand_smoothing "${HAND_SMOOTHING:-0.50}"
+add_param hand_bend_smoothing "${HAND_BEND_SMOOTHING:-0.60}"
+add_param hand_bend_max_delta "${HAND_BEND_MAX_DELTA:-0.30}"
+add_param hand_deadband "${HAND_DEADBAND:-10}"
+add_param hand_require_3d_bends_for_control "${HAND_REQUIRE_3D_BENDS_FOR_CONTROL:-true}"
+
+add_param hand_thumb_rotate_mode "${HAND_THUMB_ROTATE_MODE:-opposition}"
+add_param hand_thumb_opposition_open_ratio "${HAND_THUMB_OPPOSITION_OPEN_RATIO:-1.05}"
+add_param hand_thumb_opposition_closed_ratio "${HAND_THUMB_OPPOSITION_CLOSED_RATIO:-0.35}"
+add_param hand_thumb_opposition_gamma "${HAND_THUMB_OPPOSITION_GAMMA:-1.0}"
+add_param hand_thumb_rotate_scale "${HAND_THUMB_ROTATE_SCALE:-0.35}"
+add_param hand_thumb_straight_lock_enabled "${HAND_THUMB_STRAIGHT_LOCK_ENABLED:-true}"
+add_param hand_thumb_auto_zero_enabled "${HAND_THUMB_AUTO_ZERO_ENABLED:-true}"
+add_param hand_thumb_auto_zero_samples "${HAND_THUMB_AUTO_ZERO_SAMPLES:-5}"
+add_param hand_thumb_auto_zero_margin "${HAND_THUMB_AUTO_ZERO_MARGIN:-0.05}"
+add_param hand_thumb_bend_engage_threshold "${HAND_THUMB_BEND_ENGAGE_THRESHOLD:-0.25}"
+add_param hand_thumb_bend_release_threshold "${HAND_THUMB_BEND_RELEASE_THRESHOLD:-0.08}"
+add_param hand_thumb_rotate_engage_threshold "${HAND_THUMB_ROTATE_ENGAGE_THRESHOLD:-0.32}"
+add_param hand_thumb_rotate_release_threshold "${HAND_THUMB_ROTATE_RELEASE_THRESHOLD:-0.12}"
+add_param hand_thumb_state_confirm_frames "${HAND_THUMB_STATE_CONFIRM_FRAMES:-3}"
+add_param hand_thumb_jitter_deadband "${HAND_THUMB_JITTER_DEADBAND:-0.05}"
+
+add_param hand_reject_single_finger_spikes "${HAND_REJECT_SINGLE_FINGER_SPIKES:-true}"
+add_param hand_single_finger_spike_delta "${HAND_SINGLE_FINGER_SPIKE_DELTA:-0.22}"
+add_param hand_single_finger_spike_peer_max "${HAND_SINGLE_FINGER_SPIKE_PEER_MAX:-0.22}"
+add_param hand_spike_confirm_frames "${HAND_SPIKE_CONFIRM_FRAMES:-2}"
+add_param hand_reject_multi_finger_spikes "${HAND_REJECT_MULTI_FINGER_SPIKES:-true}"
+add_param hand_multi_finger_spike_delta "${HAND_MULTI_FINGER_SPIKE_DELTA:-0.30}"
+add_param hand_multi_finger_spike_min_count "${HAND_MULTI_FINGER_SPIKE_MIN_COUNT:-2}"
+add_param hand_multi_finger_spike_confirm_frames "${HAND_MULTI_FINGER_SPIKE_CONFIRM_FRAMES:-2}"
+add_param hand_closure_confirm_frames "${HAND_CLOSURE_CONFIRM_FRAMES:-2}"
+add_param hand_closure_confirm_delta "${HAND_CLOSURE_CONFIRM_DELTA:-0.25}"
+add_param hand_closure_confirm_value "${HAND_CLOSURE_CONFIRM_VALUE:-0.45}"
+add_param hand_closure_confirm_min_fingers "${HAND_CLOSURE_CONFIRM_MIN_FINGERS:-2}"
+add_param hand_open_on_start "${HAND_OPEN_ON_START:-true}"
+add_param hand_open_on_home "${HAND_OPEN_ON_HOME:-true}"
+add_param hand_open_on_lost "${HAND_OPEN_ON_LOST:-true}"
+add_param hand_lost_open_delay_s "${HAND_LOST_OPEN_DELAY_S:-1.0}"
+add_param hand_open_on_exit "${HAND_OPEN_ON_EXIT:-true}"
+add_param hand_configure_tool_voltage "${HAND_CONFIGURE_TOOL_VOLTAGE:-false}"
+
+add_param color_width "${COLOR_WIDTH:-1280}"
+add_param color_height "${COLOR_HEIGHT:-720}"
+add_param color_fps "${COLOR_FPS:-30}"
+add_param depth_width "${DEPTH_WIDTH:-0}"
+add_param depth_height "${DEPTH_HEIGHT:-0}"
+add_param depth_fps "${DEPTH_FPS:-0}"
+add_param auto_start_on_ready "${AUTO_START_ON_READY:-false}"
+add_param auto_start_delay_s "${AUTO_START_DELAY_S:-1.0}"
+add_param show_window "${SHOW_WINDOW:-true}"
+add_param display_max_width "${DISPLAY_MAX_WIDTH:-1280}"
+add_param display_max_height "${DISPLAY_MAX_HEIGHT:-720}"
 
 if [[ -n "${EXTRA_ROS_PARAMS:-}" ]]; then
   # shellcheck disable=SC2206
@@ -270,5 +266,7 @@ if [[ -n "${EXTRA_ROS_PARAMS:-}" ]]; then
   ARGS+=("${EXTRA_ARGS[@]}")
 fi
 
-log "Starting: ${PYTHON_BIN} ${ARGS[*]}"
+log "Starting current RM65-B + BrainCo visual controller"
+log "Home joints: ${SAFE_HOME_JOINTS:-[-1.341,-91.165,101.410,-13.002,23.072,-0.046]}"
+log "Controls: S=start/resume, H=Home and pause, Q/Esc=quit"
 exec "${PYTHON_BIN}" "${ARGS[@]}"

@@ -36,7 +36,8 @@ adapter that can load a trained ONNX landmark-to-bend regressor when available.
 - For a BrainCo Revo2 Basic hand wired to an independent Jetson USB-RS485
   adapter, set `hand_transport:=brainco-rs485` to control it through BrainCo's
   official RS485 SDK while the RM65-B arm uses RealMan CANFD motion.
-- Press `h` in the display window to return to `safe_home_joints`.
+- Press `h` in the display window to return to `safe_home_joints` and pause;
+  press `s` again after Home finishes to resume tracking/control.
 - Before sending a palm target pose, the demo reads the official joint limits
   from the controller, solves IK for the target pose, and refuses targets whose
   current or target joint angles exceed those limits with the configured margin.
@@ -73,7 +74,7 @@ python Demo/RMDemo_Python/RMDemo_HandPalmControl/src/core/hand_palm_rm65_control
   -p robot_motion_enabled:=true \
   -p robot_ip:=192.168.1.18 \
   -p arm_control_protocol:=rs485 \
-  -p safe_home_joints:="[-2.349,-91.303,99.533,2.447,84.25,0.032]" \
+  -p safe_home_joints:="[-1.341,-91.165,101.410,-13.002,23.072,-0.046]" \
   -p arm_motion_unit_m:=0.01 \
   -p max_arm_axis_offset_m:="[0.020,0.045,0.020]" \
   -p arm_speed:=10
@@ -214,7 +215,7 @@ python Demo/RMDemo_Python/RMDemo_HandPalmControl/src/core/hand_palm_rm65_control
 | `arm_slow_stop_on_pause` | `true` | Send `rm_set_arm_slow_stop` when target tracking pauses. |
 | `arm_log_command_start` | `true` | Log the exact target pose before entering the blocking RM_API motion call. Useful when diagnosing SDK stalls. |
 | `sdk_busy_log_interval_s` | `5.0` | Minimum interval for shared RM SDK busy warnings. |
-| `safe_home_joints` | `[-2.349,-91.303,99.533,2.447,84.25,0.032]` | Safe startup/home joint angles for joints 1-6, in degrees. Keep J5 away from 0 deg to avoid the RM65 wrist singularity. |
+| `safe_home_joints` | `[-1.341,-91.165,101.410,-13.002,23.072,-0.046]` | Safe startup/home joint angles for joints 1-6, in degrees. Keep J5 away from 0 deg to avoid the RM65 wrist singularity. |
 | `auto_home_on_start` | `true` | Return to `safe_home_joints` after connecting and before palm tracking controls the arm. |
 | `home_key_enabled` | `true` | Enable pressing `h` in the OpenCV window to return home. |
 | `home_speed` | `20` | Speed percentage for the safe-home `movej`. |
@@ -2365,7 +2366,7 @@ class RM65PalmFollower:
         self.safe_home_joints = self._float_list_from_param(
             node.declare_parameter(
                 "safe_home_joints",
-                [-2.349, -91.303, 99.533, 2.447, 16.05, 0.032],
+                [-1.341, -91.165, 101.410, -13.002, 23.072, -0.046],
             ).value
         )
         self.auto_home_on_start = bool(
@@ -6869,6 +6870,9 @@ class HandPalmRm65ControlNode(Node):
         self.is_shutting_down = False
         self.restart_lock = threading.Lock()
         self.tracking_state = self.STATE_WAITING
+        # Pressing H always creates a manual-resume barrier.  This prevents an
+        # enabled auto_start_on_ready policy from restarting motion after Home.
+        self.manual_resume_required = False
         self.nearest_candidate = None
         self.target_candidate = None
         self.target_lost_since = None
@@ -7053,7 +7057,13 @@ class HandPalmRm65ControlNode(Node):
     def _handle_display_action(self, action):
         if action == "start":
             if self.tracking_state == self.STATE_READY and self.nearest_candidate:
-                self._start_tracking(self.nearest_candidate)
+                if self.palm_follower.home_motion_active:
+                    self.get_logger().warn(
+                        "Home motion is still active; wait for Home to finish, "
+                        "then press 's' again."
+                    )
+                    return
+                self._start_tracking(self.nearest_candidate, reason="keyboard_s")
             elif self.tracking_state == self.STATE_WAITING:
                 self.get_logger().warn("Cannot start yet: no person candidate in view")
         elif action == "save_tuning":
@@ -7067,6 +7077,7 @@ class HandPalmRm65ControlNode(Node):
             if self.palm_follower.home_key_enabled:
                 self._reset_tracking_state()
                 self.tracking_state = self.STATE_WAITING
+                self.manual_resume_required = True
                 self.nearest_candidate = None
                 self.target_candidate = None
                 self.target_lost_since = None
@@ -7076,6 +7087,10 @@ class HandPalmRm65ControlNode(Node):
                 if self.hand_follower.open_on_home:
                     self.hand_follower.open_hand("keyboard_h")
                 self.palm_follower.request_home("keyboard_h")
+                self.get_logger().info(
+                    "Home requested; recognition/control is paused and will only "
+                    "resume after the next 's' key press."
+                )
             else:
                 self.get_logger().warn("Home key is disabled by home_key_enabled:=false")
         elif action == "quit":
@@ -7203,19 +7218,28 @@ class HandPalmRm65ControlNode(Node):
                     f"{self.person_selector.describe(candidate)}. Press 's' to start."
                 )
                 self.last_person_log_time = now
-            status = self._waiting_status_text(
-                f"Ready: nearest person {candidate.median_depth:.2f}m | press s"
-            )
+            if self.manual_resume_required:
+                ready_prefix = (
+                    "Returning Home: control paused"
+                    if self.palm_follower.home_motion_active
+                    else "Home complete: control paused | press s to resume"
+                )
+            else:
+                ready_prefix = (
+                    f"Ready: nearest person {candidate.median_depth:.2f}m | press s"
+                )
+            status = self._waiting_status_text(ready_prefix)
             roi = candidate.bbox
             if (
                 self.auto_start_on_ready
+                and not self.manual_resume_required
                 and now - self.auto_start_ready_since >= self.auto_start_delay_s
             ):
                 self.get_logger().info(
                     "Auto-starting recognition/control for nearest person "
                     f"after {now - self.auto_start_ready_since:.1f}s ready delay"
                 )
-                self._start_tracking(candidate)
+                self._start_tracking(candidate, reason="auto_ready")
                 return
 
         action = self.display.show(
@@ -7301,10 +7325,10 @@ class HandPalmRm65ControlNode(Node):
         self.operator_ready_count = self.operator_ready_count + 1 if stable else 1
         self.operator_previous_candidate = candidate
 
-    def _start_tracking(self, candidate):
+    def _start_tracking(self, candidate, reason="keyboard_s"):
         self._reset_tracking_state()
-        self._apply_pending_gui_tuning("keyboard_s")
-        if not self.palm_follower.begin_tracking_cycle("keyboard_s"):
+        self._apply_pending_gui_tuning(reason)
+        if not self.palm_follower.begin_tracking_cycle(reason):
             self.tracking_state = self.STATE_READY
             self.nearest_candidate = candidate
             self.target_candidate = None
@@ -7318,9 +7342,11 @@ class HandPalmRm65ControlNode(Node):
         self.auto_start_ready_since = None
         self.operator_ready_count = 0
         self.operator_previous_candidate = None
-        self.hand_follower.begin_tracking_cycle("keyboard_s")
+        self.hand_follower.begin_tracking_cycle(reason)
+        if reason == "keyboard_s":
+            self.manual_resume_required = False
         self.get_logger().info(
-            "Started tracking/control for nearest person: "
+            f"Started tracking/control ({reason}) for nearest person: "
             f"{self.person_selector.describe(candidate)}"
         )
 

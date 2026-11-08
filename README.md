@@ -414,6 +414,7 @@ python scripts/camera_arm_rm65b_control_rtmpose.py \
   -p arm_log_command_start:=true \
   -p auto_home_on_start:=false \
   -p home_key_enabled:=true \
+  -p 'safe_home_joints:=[-1.341,-91.165,101.410,-13.002,23.072,-0.046]' \
   -p joint_safety_enabled:=true \
   -p target_ik_safety_enabled:=true \
   -p singularity_safety_enabled:=true \
@@ -521,6 +522,7 @@ python scripts/camera_arm_rm65b_control_rtmpose.py \
   -p arm_log_command_start:=true \
   -p auto_home_on_start:=false \
   -p home_key_enabled:=true \
+  -p 'safe_home_joints:=[-1.341,-91.165,101.410,-13.002,23.072,-0.046]' \
   -p joint_safety_enabled:=true \
   -p target_ik_safety_enabled:=true \
   -p singularity_safety_enabled:=true \
@@ -619,7 +621,31 @@ python scripts/camera_arm_rm65b_control_rtmpose.py \
 
 联合运行时，机械臂和 BrainCo 手分别使用 RealMan TCP/CANFD 与独立 USB-RS485，
 但共享视觉推理和控制手关键点。首次联合测试保持 `canfd_follow:=false`，并确保灵巧手
-串口不是 RM 工具端 RS485；按 `h` 时机械臂回 Home，同时灵巧手执行张开动作。
+串口不是 RM 工具端 RS485；按 `h` 时机械臂回到
+`[-1.341,-91.165,101.410,-13.002,23.072,-0.046]`，同时灵巧手执行张开动作。程序随后
+保持暂停，即使 `auto_start_on_ready:=true` 也不会自动恢复，必须再次按 `s` 才重新建立
+控制参考并开始跟随。
+
+### 7. 安装桌面一键启动（替换旧快速启动器）
+
+新启动器使用上面第 6 节完整的机械臂与灵巧手联合参数，并覆盖旧的
+`/usr/local/bin/rm_brainco_orbbec_demo`。安装程序会先备份已有 env，停止旧 systemd
+服务，并把旧登录自启动快捷方式改名禁用，避免两个进程同时控制硬件：
+
+```bash
+cd "$HOME/ws/Jetson_Femto_Realman_Brainco_Demo_RTMPose_TensorRT"
+chmod +x jetson_autostart/run_rm_brainco_orbbec_demo.sh \
+  jetson_autostart/install_click_launcher.sh
+sudo ./jetson_autostart/install_click_launcher.sh
+```
+
+安装后双击桌面的 **RM65 Vision Control** 即可启动。启动器会先检查三个 TensorRT
+engine 和机械臂网络，再打开终端与视觉窗口；在窗口内按 `s` 启动，按 `h` 回到新的
+Home 并暂停，之后必须再次按 `s` 才能恢复。仍可在终端直接运行同一个入口：
+
+```bash
+/usr/local/bin/rm_brainco_orbbec_demo
+```
 
 ## 关键参数
 
@@ -660,6 +686,7 @@ python scripts/camera_arm_rm65b_control_rtmpose.py \
 | control_hand_side | right | left、right 或 auto |
 | robot_motion_enabled | false | 必须显式开启机械臂动作 |
 | hand_control_enabled | false | 必须显式开启灵巧手动作 |
+| safe_home_joints | `[-1.341,-91.165,101.410,-13.002,23.072,-0.046]` | Web 端确认的新安全 Home；按 H 到位后保持暂停，必须按 S 恢复 |
 | max_arm_axis_offset_m | `[0.020,0.045,0.020]` | 相对启动 TCP 的 XYZ 分轴最大位移；当前映射中第二项 Y 是左右方向 |
 | arm_axis_max_velocity_m_s | `[0.035,0.050,0.035]` | MIT 外环 XYZ 分轴最大速度，单位 m/s |
 | arm_axis_max_accel_m_s2 | `[0.160,0.240,0.160]` | MIT 外环 XYZ 分轴最大加速度，单位 m/s² |

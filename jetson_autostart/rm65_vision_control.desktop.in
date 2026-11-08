@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=RM65 Vision Control
+Name[zh_CN]=RM65视觉控制（机械臂+灵巧手）
+Comment=Start the current RTMPose TensorRT RM65-B and BrainCo controller
+Comment[zh_CN]=启动当前RTMPose TensorRT机械臂与灵巧手联合控制程序
+Exec=/usr/local/bin/rm_brainco_orbbec_demo
+Icon=utilities-terminal
+Terminal=true
+StartupNotify=true
+Categories=Development;Robotics;
