@@ -1,4 +1,5 @@
 import ast
+import ctypes
 import pathlib
 import types
 import unittest
@@ -23,6 +24,7 @@ def load_arm_workspace_methods():
     wanted = {
         "_limit_per_axis_bounds",
         "_scan_axis_direction",
+        "_sdk_check_joint_position_limit",
         "_update_effective_workspace_limits",
     }
     methods = [
@@ -39,7 +41,7 @@ def load_arm_workspace_methods():
         decorator_list=[],
     )
     module = ast.fix_missing_locations(ast.Module(body=[harness], type_ignores=[]))
-    namespace = {"np": np}
+    namespace = {"ctypes": ctypes, "np": np}
     exec(compile(module, str(SOURCE_PATH), "exec"), namespace)
     return namespace["WorkspaceHarness"]
 
@@ -99,6 +101,46 @@ class ArmWorkspaceScanTests(unittest.TestCase):
             harness.workspace_positive_axis_offset_m,
             [0.04, 0.06, 0.03],
         )
+
+    def test_sdk_joint_limit_helper_falls_back_to_ctypes_pointer(self):
+        class Logger:
+            def info(self, _message):
+                pass
+
+        class PointerOnlyRobot:
+            def __init__(self):
+                self.list_calls = 0
+                self.pointer_calls = 0
+
+            def rm_algo_ikine_check_joint_position_limit(self, values):
+                if isinstance(values, list):
+                    self.list_calls += 1
+                    raise TypeError("expected LP_c_float instance instead of list")
+                self.pointer_calls += 1
+                self.last_values = list(values)
+                return 0
+
+        harness = WorkspaceHarness()
+        harness.robot = PointerOnlyRobot()
+        harness.logger = Logger()
+        harness.sdk_joint_limit_argument_mode = None
+        harness._pad_joints_for_sdk = lambda joints: list(joints) + [0.0]
+
+        self.assertEqual(
+            harness._sdk_check_joint_position_limit([1, 2, 3, 4, 5, 6]),
+            0,
+        )
+        self.assertEqual(harness.sdk_joint_limit_argument_mode, "ctypes")
+        self.assertEqual(harness.robot.list_calls, 1)
+        self.assertEqual(harness.robot.pointer_calls, 1)
+        np.testing.assert_allclose(harness.robot.last_values, [1, 2, 3, 4, 5, 6, 0])
+
+        self.assertEqual(
+            harness._sdk_check_joint_position_limit([6, 5, 4, 3, 2, 1]),
+            0,
+        )
+        self.assertEqual(harness.robot.list_calls, 1)
+        self.assertEqual(harness.robot.pointer_calls, 2)
 
 
 if __name__ == "__main__":

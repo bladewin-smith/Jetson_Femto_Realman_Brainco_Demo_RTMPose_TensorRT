@@ -396,6 +396,7 @@ python scripts/camera_arm_rm65b_control_pose_hands.py   \
 
 import collections
 import asyncio
+import ctypes
 import json
 import math
 import os
@@ -2643,6 +2644,7 @@ class RM65PalmFollower:
         self.workspace_negative_axis_offset_m = self.max_arm_axis_offset_m.copy()
         self.workspace_positive_axis_offset_m = self.max_arm_axis_offset_m.copy()
         self.workspace_scan_reference_pose = None
+        self.sdk_joint_limit_argument_mode = None
         self.last_target_pose = None
         self.last_commanded_pose = None
         self.last_step_sent_pose = None
@@ -3596,9 +3598,7 @@ class RM65PalmFollower:
             return False
 
         try:
-            current_limit_check = self.robot.rm_algo_ikine_check_joint_position_limit(
-                self._pad_joints_for_sdk(base_joints)
-            )
+            current_limit_check = self._sdk_check_joint_position_limit(base_joints)
         except Exception as exc:
             self._fail_closed_workspace_limits()
             self.logger.error(
@@ -3768,9 +3768,7 @@ class RM65PalmFollower:
         ):
             return False, list(seed_joints), "wrist_singularity"
         try:
-            limit_check = self.robot.rm_algo_ikine_check_joint_position_limit(
-                self._pad_joints_for_sdk(target_joints)
-            )
+            limit_check = self._sdk_check_joint_position_limit(target_joints)
         except Exception as exc:
             return False, list(seed_joints), f"sdk_limit_exception:{exc}"
         if limit_check != 0:
@@ -3793,6 +3791,29 @@ class RM65PalmFollower:
         self.workspace_negative_axis_offset_m = np.zeros(3, dtype=np.float64)
         self.workspace_positive_axis_offset_m = np.zeros(3, dtype=np.float64)
         self.workspace_scan_reference_pose = None
+
+    def _sdk_check_joint_position_limit(self, joints):
+        values = self._pad_joints_for_sdk(joints)
+        check = self.robot.rm_algo_ikine_check_joint_position_limit
+        if self.sdk_joint_limit_argument_mode == "ctypes":
+            joint_array = (ctypes.c_float * len(values))(*values)
+            return int(check(joint_array))
+        if self.sdk_joint_limit_argument_mode == "list":
+            return int(check(values))
+
+        try:
+            result = check(values)
+        except (TypeError, ctypes.ArgumentError):
+            joint_array = (ctypes.c_float * len(values))(*values)
+            result = check(joint_array)
+            self.sdk_joint_limit_argument_mode = "ctypes"
+            self.logger.info(
+                "RM_API joint-limit helper selected ctypes float-pointer "
+                "compatibility mode"
+            )
+        else:
+            self.sdk_joint_limit_argument_mode = "list"
+        return int(result)
 
     def _load_joint_limits(self):
         if not self.joint_safety_enabled:
@@ -3924,9 +3945,7 @@ class RM65PalmFollower:
             return False
 
         try:
-            limit_check = self.robot.rm_algo_ikine_check_joint_position_limit(
-                self._pad_joints_for_sdk(target_joints)
-            )
+            limit_check = self._sdk_check_joint_position_limit(target_joints)
             if limit_check != 0:
                 self.last_target_safety_failure_reason = "sdk_target_joint_limit"
                 self.logger.warn(
