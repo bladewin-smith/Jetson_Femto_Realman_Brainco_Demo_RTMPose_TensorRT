@@ -75,7 +75,7 @@ python Demo/RMDemo_Python/RMDemo_HandPalmControl/src/core/hand_palm_rm65_control
   -p arm_control_protocol:=rs485 \
   -p safe_home_joints:="[-2.349,-91.303,99.533,2.447,84.25,0.032]" \
   -p arm_motion_unit_m:=0.01 \
-  -p max_arm_offset_m:=0.15 \
+  -p max_arm_axis_offset_m:="[0.020,0.045,0.020]" \
   -p arm_speed:=10
 ```
 
@@ -233,8 +233,8 @@ python Demo/RMDemo_Python/RMDemo_HandPalmControl/src/core/hand_palm_rm65_control
 | `arm_mit_control_enabled` | `true` | Enable a Cartesian outer-loop spring-damper filter before sending RS485/CANFD targets. This is MIT-style trajectory shaping, not low-level torque control. |
 | `arm_mit_kp` | `70.0` | Virtual spring gain for the outer-loop target filter. Larger values track faster. |
 | `arm_mit_kd` | `16.0` | Virtual damping gain for the outer-loop target filter. Larger values suppress overshoot. |
-| `arm_mit_max_velocity_m_s` | `0.22` | Maximum filtered Cartesian target velocity. |
-| `arm_mit_max_accel_m_s2` | `1.5` | Maximum filtered Cartesian target acceleration. |
+| `arm_axis_max_velocity_m_s` | `[0.035,0.050,0.035]` | Per-axis filtered Cartesian velocity limits in robot X/Y/Z order. |
+| `arm_axis_max_accel_m_s2` | `[0.160,0.240,0.160]` | Per-axis filtered Cartesian acceleration limits in robot X/Y/Z order. |
 | `p` key | n/a | While waiting for `s`, save GUI trackbar values to `camera_arm_rm65b_control.defaults.json`; omit those GUI-tuned parameters from the next launch command to reuse the saved defaults. |
 | `arm_axis_scale` | `[1.0,1.4,1.4]` | Extra per-axis robot-base scale after `camera_to_arm_matrix`; useful for making left/right or up/down tracking more sensitive. |
 | `arm_axis_deadband_m` | `[0.003,0.003,0.003]` | Per-axis robot-base deadband before quantization. |
@@ -242,8 +242,8 @@ python Demo/RMDemo_Python/RMDemo_HandPalmControl/src/core/hand_palm_rm65_control
 | `palm_filter_alpha` | `0.55` | Anti-drift palm filter movement alpha. Higher values respond faster. |
 | `palm_filter_hold_deadband_m` | `0.008` | Hold the arm still when filtered palm motion stays inside this range. |
 | `palm_filter_release_deadband_m` | `0.014` | Release the anti-drift hold when palm motion exceeds this range. |
-| `max_arm_offset_m` | `0.15` | Maximum distance from startup TCP pose. |
-| `max_arm_target_delta_m` | `0.02` | Maximum Cartesian target change per command. Limits sudden camera/landmark jumps. |
+| `max_arm_axis_offset_m` | `[0.020,0.045,0.020]` | Per-axis travel limits from the startup TCP pose in robot X/Y/Z order. |
+| `max_arm_target_delta_axis_m` | `[0.004,0.006,0.004]` | Per-axis Cartesian target change allowed per command in robot X/Y/Z order. |
 | `arm_command_interval_s` | `0.15` | Minimum interval between robot target updates. |
 | `arm_rs485_step_min_command_interval_s` | `0.10` | Minimum effective command interval for RS485 `rm_set_pos_step`, even if GUI `Cmd_ms` is lower. Prevents flooding the controller. |
 | `arm_rs485_step_axis_interval_s` | `0.02` | Small spacing between X/Y/Z `rm_set_pos_step` commands in one Cartesian update. |
@@ -348,7 +348,7 @@ python Demo/RMDemo_Python/RMDemo_HandPalmControl/src/core/hand_palm_rm65_control
 | `hand_rs485_verify_on_start` | `true` | Read Revo2 device info during startup to verify the RS485 link. |
 
 For first real-machine tests, use a small `arm_motion_unit_m`, low `arm_speed`,
-and a conservative `max_arm_offset_m`.
+and conservative `max_arm_axis_offset_m` values.
 
 
 python /home/jetson/ws/pyorbbecsdk-2-main/camera_arm_rm65b_control.py \
@@ -464,9 +464,10 @@ GUI_TUNING_KEYS = (
     "arm_mit_control_enabled",
     "arm_mit_kp",
     "arm_mit_kd",
-    "arm_mit_max_velocity_m_s",
-    "arm_mit_max_accel_m_s2",
-    "max_arm_target_delta_m",
+    "arm_axis_max_velocity_m_s",
+    "arm_axis_max_accel_m_s2",
+    "max_arm_axis_offset_m",
+    "max_arm_target_delta_axis_m",
     "arm_command_interval_s",
     "hand_deadband_m",
     "arm_axis_deadband_m",
@@ -1959,9 +1960,6 @@ class CvDisplay:
         ("arm_mit_control_enabled", "MIT_on", 1, 1.0),
         ("arm_mit_kp", "MIT_kp", 200, 1.0),
         ("arm_mit_kd", "MIT_kd_x10", 500, 0.1),
-        ("arm_mit_max_velocity_m_s", "MIT_vmax_x100", 100, 0.01),
-        ("arm_mit_max_accel_m_s2", "MIT_amax_x100", 500, 0.01),
-        ("max_arm_target_delta_m", "Max_d_mm", 50, 0.001),
         ("arm_command_interval_s", "Cmd_ms", 500, 0.001),
         ("hand_deadband_m", "Palm_db_mm", 50, 0.001),
         ("arm_axis_deadband_m", "Axis_db_mm", 30, 0.001),
@@ -1979,9 +1977,6 @@ class CvDisplay:
         "arm_mit_control_enabled": "Arm Tune",
         "arm_mit_kp": "Arm Tune",
         "arm_mit_kd": "Arm Tune",
-        "arm_mit_max_velocity_m_s": "Arm Tune",
-        "arm_mit_max_accel_m_s2": "Arm Tune",
-        "max_arm_target_delta_m": "Arm Tune",
         "arm_command_interval_s": "Arm Tune",
         "hand_deadband_m": "Palm Tune",
         "arm_axis_deadband_m": "Palm Tune",
@@ -2149,9 +2144,6 @@ class CvDisplay:
                 values[key] = float(raw_value) * scale
         values["arm_mit_kp"] = max(1.0, values["arm_mit_kp"])
         values["arm_mit_kd"] = max(0.0, values["arm_mit_kd"])
-        values["arm_mit_max_velocity_m_s"] = max(0.01, values["arm_mit_max_velocity_m_s"])
-        values["arm_mit_max_accel_m_s2"] = max(0.01, values["arm_mit_max_accel_m_s2"])
-        values["max_arm_target_delta_m"] = max(0.001, values["max_arm_target_delta_m"])
         values["arm_command_interval_s"] = max(0.03, values["arm_command_interval_s"])
         values["hand_deadband_m"] = max(0.0, values["hand_deadband_m"])
         axis_deadband = max(0.0, values["arm_axis_deadband_m"])
@@ -2425,30 +2417,28 @@ class RM65PalmFollower:
                 persistent_default(node, "arm_mit_kd", 16.0),
             ).value
         )
-        self.mit_max_velocity_m_s = float(
+        self.arm_axis_max_velocity_m_s = self._positive_vector3_from_param(
             node.declare_parameter(
-                "arm_mit_max_velocity_m_s",
-                persistent_default(node, "arm_mit_max_velocity_m_s", 0.22),
-            ).value
+                "arm_axis_max_velocity_m_s",
+                persistent_default(
+                    node,
+                    "arm_axis_max_velocity_m_s",
+                    [0.035, 0.050, 0.035],
+                ),
+            ).value,
+            "arm_axis_max_velocity_m_s",
         )
-        self.mit_max_accel_m_s2 = float(
+        self.arm_axis_max_accel_m_s2 = self._positive_vector3_from_param(
             node.declare_parameter(
-                "arm_mit_max_accel_m_s2",
-                persistent_default(node, "arm_mit_max_accel_m_s2", 1.5),
-            ).value
+                "arm_axis_max_accel_m_s2",
+                persistent_default(
+                    node,
+                    "arm_axis_max_accel_m_s2",
+                    [0.160, 0.240, 0.160],
+                ),
+            ).value,
+            "arm_axis_max_accel_m_s2",
         )
-        mit_max_accel_typo = float(
-            node.declare_parameter(
-                "arm_mit_max_accl_m_s2",
-                self.mit_max_accel_m_s2,
-            ).value
-        )
-        if abs(mit_max_accel_typo - self.mit_max_accel_m_s2) > 1e-9:
-            self.logger.warn(
-                "Parameter arm_mit_max_accl_m_s2 is deprecated; use "
-                "arm_mit_max_accel_m_s2 instead"
-            )
-            self.mit_max_accel_m_s2 = mit_max_accel_typo
         axis_scale_values = node.declare_parameter(
             "arm_axis_scale",
             [1.0, 1.4, 1.4],
@@ -2495,14 +2485,27 @@ class RM65PalmFollower:
         self.palm_filter_velocity_deadband_m_s = float(
             node.declare_parameter("palm_filter_velocity_deadband_m_s", 0.025).value
         )
-        self.max_arm_offset_m = float(
-            node.declare_parameter("max_arm_offset_m", 0.15).value
-        )
-        self.max_arm_target_delta_m = float(
+        self.max_arm_axis_offset_m = self._positive_vector3_from_param(
             node.declare_parameter(
-                "max_arm_target_delta_m",
-                persistent_default(node, "max_arm_target_delta_m", 0.02),
-            ).value
+                "max_arm_axis_offset_m",
+                persistent_default(
+                    node,
+                    "max_arm_axis_offset_m",
+                    [0.020, 0.045, 0.020],
+                ),
+            ).value,
+            "max_arm_axis_offset_m",
+        )
+        self.max_arm_target_delta_axis_m = self._positive_vector3_from_param(
+            node.declare_parameter(
+                "max_arm_target_delta_axis_m",
+                persistent_default(
+                    node,
+                    "max_arm_target_delta_axis_m",
+                    [0.004, 0.006, 0.004],
+                ),
+            ).value,
+            "max_arm_target_delta_axis_m",
         )
         self.command_interval_s = float(
             node.declare_parameter(
@@ -2541,14 +2544,13 @@ class RM65PalmFollower:
         self.min_command_delta_m = float(
             node.declare_parameter("min_command_delta_m", 0.005).value
         )
-        if (
-            self.max_arm_target_delta_m > 0.0
-            and self.min_command_delta_m >= self.max_arm_target_delta_m
-        ):
-            adjusted_min_delta = max(0.0005, self.max_arm_target_delta_m * 0.5)
+        min_axis_target_delta = float(np.min(self.max_arm_target_delta_axis_m))
+        if self.min_command_delta_m >= min_axis_target_delta:
+            adjusted_min_delta = max(0.0005, min_axis_target_delta * 0.5)
             self.logger.warn(
                 "min_command_delta_m is greater than or equal to "
-                "max_arm_target_delta_m; this can suppress every bounded "
+                "the smallest max_arm_target_delta_axis_m value; this can "
+                "suppress every bounded "
                 "tracking target. Adjusting min_command_delta_m from "
                 f"{self.min_command_delta_m:.4f}m to {adjusted_min_delta:.4f}m."
             )
@@ -2737,9 +2739,10 @@ class RM65PalmFollower:
             "arm_mit_control_enabled": bool(self.mit_control_enabled),
             "arm_mit_kp": float(self.mit_kp),
             "arm_mit_kd": float(self.mit_kd),
-            "arm_mit_max_velocity_m_s": float(self.mit_max_velocity_m_s),
-            "arm_mit_max_accel_m_s2": float(self.mit_max_accel_m_s2),
-            "max_arm_target_delta_m": float(self.max_arm_target_delta_m),
+            "arm_axis_max_velocity_m_s": self.arm_axis_max_velocity_m_s.tolist(),
+            "arm_axis_max_accel_m_s2": self.arm_axis_max_accel_m_s2.tolist(),
+            "max_arm_axis_offset_m": self.max_arm_axis_offset_m.tolist(),
+            "max_arm_target_delta_axis_m": self.max_arm_target_delta_axis_m.tolist(),
             "arm_command_interval_s": float(self.command_interval_s),
             "hand_deadband_m": float(self.hand_deadband_m),
             "arm_axis_deadband_m": [float(value) for value in self.arm_axis_deadband_m],
@@ -2754,23 +2757,29 @@ class RM65PalmFollower:
         )
         self.mit_kp = max(1.0, float(values.get("arm_mit_kp", self.mit_kp)))
         self.mit_kd = max(0.0, float(values.get("arm_mit_kd", self.mit_kd)))
-        self.mit_max_velocity_m_s = max(
-            0.01,
-            float(values.get("arm_mit_max_velocity_m_s", self.mit_max_velocity_m_s)),
-        )
-        self.mit_max_accel_m_s2 = max(
-            0.01,
-            float(values.get("arm_mit_max_accel_m_s2", self.mit_max_accel_m_s2)),
-        )
-        self.max_arm_target_delta_m = max(
-            0.001,
-            float(values.get("max_arm_target_delta_m", self.max_arm_target_delta_m)),
-        )
-        if (
-            self.max_arm_target_delta_m > 0.0
-            and self.min_command_delta_m >= self.max_arm_target_delta_m
-        ):
-            self.min_command_delta_m = max(0.0005, self.max_arm_target_delta_m * 0.5)
+        if "arm_axis_max_velocity_m_s" in values:
+            self.arm_axis_max_velocity_m_s = self._positive_vector3_from_param(
+                values["arm_axis_max_velocity_m_s"],
+                "arm_axis_max_velocity_m_s",
+            )
+        if "arm_axis_max_accel_m_s2" in values:
+            self.arm_axis_max_accel_m_s2 = self._positive_vector3_from_param(
+                values["arm_axis_max_accel_m_s2"],
+                "arm_axis_max_accel_m_s2",
+            )
+        if "max_arm_axis_offset_m" in values:
+            self.max_arm_axis_offset_m = self._positive_vector3_from_param(
+                values["max_arm_axis_offset_m"],
+                "max_arm_axis_offset_m",
+            )
+        if "max_arm_target_delta_axis_m" in values:
+            self.max_arm_target_delta_axis_m = self._positive_vector3_from_param(
+                values["max_arm_target_delta_axis_m"],
+                "max_arm_target_delta_axis_m",
+            )
+        min_axis_target_delta = float(np.min(self.max_arm_target_delta_axis_m))
+        if self.min_command_delta_m >= min_axis_target_delta:
+            self.min_command_delta_m = max(0.0005, min_axis_target_delta * 0.5)
         self.command_interval_s = max(
             self._min_command_interval_s(),
             float(values.get("arm_command_interval_s", self.command_interval_s)),
@@ -2812,9 +2821,10 @@ class RM65PalmFollower:
             "Applied arm tuning "
             f"({reason}): enabled={self.mit_control_enabled}, "
             f"kp={self.mit_kp:.1f}, kd={self.mit_kd:.1f}, "
-            f"vmax={self.mit_max_velocity_m_s:.3f}m/s, "
-            f"amax={self.mit_max_accel_m_s2:.3f}m/s^2, "
-            f"max_delta={self.max_arm_target_delta_m:.3f}m, "
+            f"axis_vmax={self.arm_axis_max_velocity_m_s.tolist()}m/s, "
+            f"axis_amax={self.arm_axis_max_accel_m_s2.tolist()}m/s^2, "
+            f"axis_offset={self.max_arm_axis_offset_m.tolist()}m, "
+            f"axis_delta={self.max_arm_target_delta_axis_m.tolist()}m, "
             f"min_cmd_delta={self.min_command_delta_m:.4f}m, "
             f"cmd_interval={self.command_interval_s:.3f}s, "
             f"palm_deadband={self.hand_deadband_m:.3f}m, "
@@ -2915,10 +2925,17 @@ class RM65PalmFollower:
         if np.linalg.norm(arm_offset) < self.hand_deadband_m:
             arm_offset = np.zeros(3, dtype=np.float64)
         else:
-            arm_offset = self._limit_norm(arm_offset, self.max_arm_offset_m)
+            arm_offset = self._limit_per_axis(
+                arm_offset,
+                self.max_arm_axis_offset_m,
+            )
         arm_offset = self._anti_drift_filter_offset(arm_offset)
         arm_offset = self._mit_filter_offset(arm_offset)
         arm_offset = self._quantize(arm_offset, self.arm_motion_unit_m)
+        arm_offset = self._limit_per_axis(
+            arm_offset,
+            self.max_arm_axis_offset_m,
+        )
 
         target_pose = list(self.initial_pose)
         for idx in range(3):
@@ -3199,17 +3216,20 @@ class RM65PalmFollower:
 
     def _limit_target_delta(self, target_pose, arm_offset):
         reference_pose = self._target_delta_reference_pose()
-        if self.max_arm_target_delta_m <= 0.0 or reference_pose is None:
+        if reference_pose is None:
             return target_pose, arm_offset
 
         previous_xyz = np.array(reference_pose[:3], dtype=np.float64)
         target_xyz = np.array(target_pose[:3], dtype=np.float64)
         delta = target_xyz - previous_xyz
-        delta_norm = np.linalg.norm(delta)
-        if delta_norm <= self.max_arm_target_delta_m or delta_norm < 1e-9:
+        limited_delta = self._limit_per_axis(
+            delta,
+            self.max_arm_target_delta_axis_m,
+        )
+        if np.allclose(limited_delta, delta, rtol=0.0, atol=1e-12):
             return target_pose, arm_offset
 
-        limited_xyz = previous_xyz + delta * (self.max_arm_target_delta_m / delta_norm)
+        limited_xyz = previous_xyz + limited_delta
         limited_pose = list(target_pose)
         for idx in range(3):
             limited_pose[idx] = float(limited_xyz[idx])
@@ -3245,17 +3265,20 @@ class RM65PalmFollower:
 
         error = desired_offset - self.mit_position_offset
         acceleration = self.mit_kp * error - self.mit_kd * self.mit_velocity_offset
-        acceleration = self._limit_norm(acceleration, self.mit_max_accel_m_s2)
+        acceleration = self._limit_per_axis(
+            acceleration,
+            self.arm_axis_max_accel_m_s2,
+        )
 
         self.mit_velocity_offset += acceleration * dt
-        self.mit_velocity_offset = self._limit_norm(
+        self.mit_velocity_offset = self._limit_per_axis(
             self.mit_velocity_offset,
-            self.mit_max_velocity_m_s,
+            self.arm_axis_max_velocity_m_s,
         )
         self.mit_position_offset += self.mit_velocity_offset * dt
-        self.mit_position_offset = self._limit_norm(
+        self.mit_position_offset = self._limit_per_axis(
             self.mit_position_offset,
-            self.max_arm_offset_m,
+            self.max_arm_axis_offset_m,
         )
 
         if (
@@ -3683,11 +3706,10 @@ class RM65PalmFollower:
         self.motion_stage = None
 
     @staticmethod
-    def _limit_norm(vector, max_norm):
-        norm = np.linalg.norm(vector)
-        if max_norm <= 0.0 or norm <= max_norm or norm < 1e-9:
-            return vector
-        return vector * (max_norm / norm)
+    def _limit_per_axis(vector, max_abs_values):
+        vector = np.asarray(vector, dtype=np.float64)
+        max_abs_values = np.asarray(max_abs_values, dtype=np.float64)
+        return np.clip(vector, -max_abs_values, max_abs_values)
 
     @staticmethod
     def _quantize(vector, unit):
@@ -3716,6 +3738,13 @@ class RM65PalmFollower:
         if len(values) != 3:
             raise ValueError(f"{name} must contain 3 float values")
         return values
+
+    @classmethod
+    def _positive_vector3_from_param(cls, values, name):
+        vector = cls._vector3_from_param(values, name)
+        if np.any(vector <= 0.0):
+            raise ValueError(f"{name} values must all be greater than zero")
+        return vector
 
     @staticmethod
     def _float_list_from_param(values):
@@ -7015,12 +7044,16 @@ class HandPalmRm65ControlNode(Node):
         axis_deadband = values.get("arm_axis_deadband_m", 0.0)
         if isinstance(axis_deadband, (list, tuple, np.ndarray)):
             axis_deadband = max(float(value) for value in axis_deadband[:3])
+        axis_vmax = values.get("arm_axis_max_velocity_m_s", [0.0, 0.0, 0.0])
+        axis_amax = values.get("arm_axis_max_accel_m_s2", [0.0, 0.0, 0.0])
+        axis_delta = values.get("max_arm_target_delta_axis_m", [0.0, 0.0, 0.0])
         return (
             f"{prefix} | p save | "
             f"kp={values.get('arm_mit_kp', 0):.0f} "
             f"kd={values.get('arm_mit_kd', 0):.1f} "
-            f"v={values.get('arm_mit_max_velocity_m_s', 0):.2f} "
-            f"a={values.get('arm_mit_max_accel_m_s2', 0):.2f} "
+            f"vY={float(axis_vmax[1]):.2f} "
+            f"aY={float(axis_amax[1]):.2f} "
+            f"dY={float(axis_delta[1]) * 1000.0:.0f}mm "
             f"palm={values.get('hand_deadband_m', 0) * 1000.0:.0f}mm "
             f"axis={float(axis_deadband) * 1000.0:.0f}mm "
             f"hold={values.get('palm_filter_hold_deadband_m', 0) * 1000.0:.0f}/"

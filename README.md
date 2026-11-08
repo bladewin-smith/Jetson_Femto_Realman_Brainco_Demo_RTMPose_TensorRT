@@ -398,6 +398,10 @@ Thumb auto-zero ready: bend_baseline=..., rotate_baseline=...
 | control_hand_side | right | left、right 或 auto |
 | robot_motion_enabled | false | 必须显式开启机械臂动作 |
 | hand_control_enabled | false | 必须显式开启灵巧手动作 |
+| max_arm_axis_offset_m | `[0.020,0.045,0.020]` | 相对启动 TCP 的 XYZ 分轴最大位移；当前映射中第二项 Y 是左右方向 |
+| arm_axis_max_velocity_m_s | `[0.035,0.050,0.035]` | MIT 外环 XYZ 分轴最大速度，单位 m/s |
+| arm_axis_max_accel_m_s2 | `[0.160,0.240,0.160]` | MIT 外环 XYZ 分轴最大加速度，单位 m/s² |
+| max_arm_target_delta_axis_m | `[0.004,0.006,0.004]` | 每条机械臂命令允许的 XYZ 分轴最大目标变化，单位 m |
 | hand_bend_calibration_enabled | true | 在发送硬件命令前启用逐指开合标定；ROS 话题仍保留原始弯曲度 |
 | hand_bend_open_calibration | `[0.18,0.08,0.13,0.09,0.13]` | 完全张开标定，顺序为 thumb/index/middle/ring/pinky |
 | hand_bend_closed_calibration | `[0.56,0.92,0.91,0.86,0.87]` | 完全握拳标定，顺序同上 |
@@ -416,6 +420,19 @@ Thumb auto-zero ready: bend_baseline=..., rotate_baseline=...
 | hand_thumb_rotate_engage_threshold / release_threshold | 0.30 / 0.12 | 拇指旋转轴进入/退出动作状态的双阈值 |
 | hand_thumb_state_confirm_frames | 3 | 拇指动作必须连续超过进入阈值的帧数 |
 | hand_thumb_jitter_deadband | 0.04 | 拇指已动作状态下保持不变的微小波动范围 |
+
+四个分轴参数均可通过 ROS 2 终端参数覆盖，数组顺序固定为机械臂
+`[X（前后）, Y（左右）, Z（上下）]`：
+
+```bash
+-p 'max_arm_axis_offset_m:=[0.020,0.045,0.020]' \
+-p 'arm_axis_max_velocity_m_s:=[0.035,0.050,0.035]' \
+-p 'arm_axis_max_accel_m_s2:=[0.160,0.240,0.160]' \
+-p 'max_arm_target_delta_axis_m:=[0.004,0.006,0.004]'
+```
+
+这些参数采用逐轴裁剪，不再使用单个球形范数限制；因此某一方向达到上限时，
+不会再按比例压缩另外两个方向的有效范围。
 
 ## 测试
 
