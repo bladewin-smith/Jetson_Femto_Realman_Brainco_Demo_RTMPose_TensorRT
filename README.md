@@ -402,6 +402,14 @@ Thumb auto-zero ready: bend_baseline=..., rotate_baseline=...
 | arm_axis_max_velocity_m_s | `[0.035,0.050,0.035]` | MIT 外环 XYZ 分轴最大速度，单位 m/s |
 | arm_axis_max_accel_m_s2 | `[0.160,0.240,0.160]` | MIT 外环 XYZ 分轴最大加速度，单位 m/s² |
 | max_arm_target_delta_axis_m | `[0.004,0.006,0.004]` | 每条机械臂命令允许的 XYZ 分轴最大目标变化，单位 m |
+| arm_workspace_scan_enabled | true | 每次建立 TCP 控制参考时执行不运动的 XYZ 正负六方向 IK 扫描 |
+| arm_workspace_scan_max_distance_m | `[0.600,0.600,0.600]` | XYZ 每个正负方向的最大探测距离，单位 m |
+| arm_workspace_scan_step_m | 0.010 | 首轮粗扫描步长，单位 m；边界随后二分细化 |
+| arm_workspace_scan_refine_iterations | 6 | 首个不可用边界的二分细化次数 |
+| arm_workspace_scan_safety_ratio | 0.80 | 只保留每个方向 IK 可达距离的比例 |
+| arm_workspace_scan_min_effective_m | 0.005 | 任一方向最终范围低于该值时拒绝开始跟踪 |
+| arm_state_read_retries | 5 | 启动和重置参考点时读取当前机械臂状态的最大次数 |
+| arm_state_read_retry_interval_s | 0.20 | 状态读取重试间隔，单位 s |
 | hand_bend_calibration_enabled | true | 在发送硬件命令前启用逐指开合标定；ROS 话题仍保留原始弯曲度 |
 | hand_bend_open_calibration | `[0.18,0.08,0.13,0.09,0.13]` | 完全张开标定，顺序为 thumb/index/middle/ring/pinky |
 | hand_bend_closed_calibration | `[0.56,0.92,0.91,0.86,0.87]` | 完全握拳标定，顺序同上 |
@@ -421,18 +429,45 @@ Thumb auto-zero ready: bend_baseline=..., rotate_baseline=...
 | hand_thumb_state_confirm_frames | 3 | 拇指动作必须连续超过进入阈值的帧数 |
 | hand_thumb_jitter_deadband | 0.04 | 拇指已动作状态下保持不变的微小波动范围 |
 
-四个分轴参数均可通过 ROS 2 终端参数覆盖，数组顺序固定为机械臂
+分轴参数和 IK 扫描参数均可通过 ROS 2 终端参数覆盖，数组顺序固定为机械臂
 `[X（前后）, Y（左右）, Z（上下）]`：
 
 ```bash
 -p 'max_arm_axis_offset_m:=[0.020,0.045,0.020]' \
 -p 'arm_axis_max_velocity_m_s:=[0.035,0.050,0.035]' \
 -p 'arm_axis_max_accel_m_s2:=[0.160,0.240,0.160]' \
--p 'max_arm_target_delta_axis_m:=[0.004,0.006,0.004]'
+-p 'max_arm_target_delta_axis_m:=[0.004,0.006,0.004]' \
+-p arm_workspace_scan_enabled:=true \
+-p 'arm_workspace_scan_max_distance_m:=[0.600,0.600,0.600]' \
+-p arm_workspace_scan_step_m:=0.010 \
+-p arm_workspace_scan_refine_iterations:=6 \
+-p arm_workspace_scan_safety_ratio:=0.80 \
+-p arm_workspace_scan_min_effective_m:=0.005 \
+-p arm_state_read_retries:=5 \
+-p arm_state_read_retry_interval_s:=0.20
 ```
 
 这些参数采用逐轴裁剪，不再使用单个球形范数限制；因此某一方向达到上限时，
 不会再按比例压缩另外两个方向的有效范围。
+
+启用扫描后，程序在连接成功、按 `s` 重置控制参考，以及回到安全 Home 后，固定
+当前 TCP 姿态，只调用逆解和关节限位检查，依次探测 `-X/+X/-Y/+Y/-Z/+Z`；扫描
+不会发送 `movej`、`movel` 或 CANFD 透传运动命令。每个方向先按
+`arm_workspace_scan_step_m` 粗扫到第一个不可用点，再二分逼近边界，并检查官方
+关节范围与 `joint_limit_margin_deg`、J5 腕部奇异区以及 SDK 关节位置限位。最终每个
+方向的运行限幅为：
+
+```text
+min(max_arm_axis_offset_m, 扫描可达距离 * arm_workspace_scan_safety_ratio)
+```
+
+因此 XYZ 正负方向可以得到六个不同的实际限幅。终端日志中的
+`effective_negative` 和 `effective_positive` 即本次控制参考实际使用的范围；如果任一
+方向低于 `arm_workspace_scan_min_effective_m`，程序会保持零范围并拒绝跟踪。
+
+该扫描只验证当前姿态下的运动学、关节限位和腕部奇异点，不识别外部障碍物、线缆、
+桌面或人体，也不等价于完整碰撞检测。分轴扫描构成的是局部轴向安全盒，组合方向的
+每一个实际目标仍由运行时 IK 安全检查再次验证。
 
 ## 测试
 

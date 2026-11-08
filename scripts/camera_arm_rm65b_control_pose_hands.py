@@ -244,6 +244,14 @@ python Demo/RMDemo_Python/RMDemo_HandPalmControl/src/core/hand_palm_rm65_control
 | `palm_filter_release_deadband_m` | `0.014` | Release the anti-drift hold when palm motion exceeds this range. |
 | `max_arm_axis_offset_m` | `[0.020,0.045,0.020]` | Per-axis travel limits from the startup TCP pose in robot X/Y/Z order. |
 | `max_arm_target_delta_axis_m` | `[0.004,0.006,0.004]` | Per-axis Cartesian target change allowed per command in robot X/Y/Z order. |
+| `arm_workspace_scan_enabled` | `true` | Run a non-moving six-direction IK scan whenever the TCP control reference is reset. |
+| `arm_workspace_scan_max_distance_m` | `[0.600,0.600,0.600]` | Maximum IK probe distance for X/Y/Z in both positive and negative directions. |
+| `arm_workspace_scan_step_m` | `0.010` | Coarse IK scan step before binary refinement. |
+| `arm_workspace_scan_refine_iterations` | `6` | Binary-search iterations used to refine the first unsafe boundary. |
+| `arm_workspace_scan_safety_ratio` | `0.80` | Fraction of each IK-reachable directional distance retained as a safety margin. |
+| `arm_workspace_scan_min_effective_m` | `0.005` | Refuse tracking when any positive or negative effective direction is smaller than this value. |
+| `arm_state_read_retries` | `5` | Current-pose read attempts before startup/reference reset fails closed. |
+| `arm_state_read_retry_interval_s` | `0.20` | Delay between current-pose read attempts. |
 | `arm_command_interval_s` | `0.15` | Minimum interval between robot target updates. |
 | `arm_rs485_step_min_command_interval_s` | `0.10` | Minimum effective command interval for RS485 `rm_set_pos_step`, even if GUI `Cmd_ms` is lower. Prevents flooding the controller. |
 | `arm_rs485_step_axis_interval_s` | `0.02` | Small spacing between X/Y/Z `rm_set_pos_step` commands in one Cartesian update. |
@@ -2507,6 +2515,58 @@ class RM65PalmFollower:
             ).value,
             "max_arm_target_delta_axis_m",
         )
+        self.workspace_scan_enabled = bool(
+            node.declare_parameter("arm_workspace_scan_enabled", True).value
+        )
+        self.workspace_scan_max_distance_m = self._positive_vector3_from_param(
+            node.declare_parameter(
+                "arm_workspace_scan_max_distance_m",
+                [0.600, 0.600, 0.600],
+            ).value,
+            "arm_workspace_scan_max_distance_m",
+        )
+        self.workspace_scan_step_m = float(
+            node.declare_parameter("arm_workspace_scan_step_m", 0.010).value
+        )
+        if self.workspace_scan_step_m <= 0.0:
+            raise ValueError("arm_workspace_scan_step_m must be greater than zero")
+        self.workspace_scan_refine_iterations = int(
+            node.declare_parameter("arm_workspace_scan_refine_iterations", 6).value
+        )
+        if self.workspace_scan_refine_iterations < 0:
+            raise ValueError("arm_workspace_scan_refine_iterations must be non-negative")
+        self.workspace_scan_safety_ratio = float(
+            node.declare_parameter("arm_workspace_scan_safety_ratio", 0.80).value
+        )
+        if not 0.0 < self.workspace_scan_safety_ratio <= 1.0:
+            raise ValueError("arm_workspace_scan_safety_ratio must be in (0, 1]")
+        self.workspace_scan_min_effective_m = float(
+            node.declare_parameter("arm_workspace_scan_min_effective_m", 0.005).value
+        )
+        if self.workspace_scan_min_effective_m < 0.0:
+            raise ValueError("arm_workspace_scan_min_effective_m must be non-negative")
+        self.arm_state_read_retries = int(
+            node.declare_parameter("arm_state_read_retries", 5).value
+        )
+        self.arm_state_read_retry_interval_s = float(
+            node.declare_parameter("arm_state_read_retry_interval_s", 0.20).value
+        )
+        if self.arm_state_read_retries < 1:
+            raise ValueError("arm_state_read_retries must be at least one")
+        if self.arm_state_read_retry_interval_s < 0.0:
+            raise ValueError("arm_state_read_retry_interval_s must be non-negative")
+        if self.workspace_scan_enabled and not self.joint_safety_enabled:
+            raise ValueError(
+                "arm_workspace_scan_enabled requires joint_safety_enabled:=true"
+            )
+        if self.workspace_scan_enabled and not self.target_ik_safety_enabled:
+            raise ValueError(
+                "arm_workspace_scan_enabled requires target_ik_safety_enabled:=true"
+            )
+        if self.workspace_scan_enabled and not self.singularity_safety_enabled:
+            raise ValueError(
+                "arm_workspace_scan_enabled requires singularity_safety_enabled:=true"
+            )
         self.command_interval_s = float(
             node.declare_parameter(
                 "arm_command_interval_s",
@@ -2574,6 +2634,15 @@ class RM65PalmFollower:
         self.joint_min_limits = None
         self.joint_max_limits = None
         self.initial_pose = None
+        self.workspace_scanned_negative_axis_offset_m = np.full(
+            3, np.inf, dtype=np.float64
+        )
+        self.workspace_scanned_positive_axis_offset_m = np.full(
+            3, np.inf, dtype=np.float64
+        )
+        self.workspace_negative_axis_offset_m = self.max_arm_axis_offset_m.copy()
+        self.workspace_positive_axis_offset_m = self.max_arm_axis_offset_m.copy()
+        self.workspace_scan_reference_pose = None
         self.last_target_pose = None
         self.last_commanded_pose = None
         self.last_step_sent_pose = None
@@ -2677,9 +2746,16 @@ class RM65PalmFollower:
         try:
             if self.recover_motion_state_on_tracking_start:
                 self._recover_motion_state_locked("tracking_start")
-            self._refresh_initial_pose_from_current_state()
+            reference_ready = self._refresh_initial_pose_from_current_state(reason)
         finally:
             self.sdk_lock.release()
+
+        if not reference_ready:
+            self.logger.error(
+                "Cannot start RM65-B tracking because the TCP reference or "
+                "six-direction IK workspace scan failed"
+            )
+            return False
 
         with self.motion_lock:
             self.pending_motion = None
@@ -2772,6 +2848,7 @@ class RM65PalmFollower:
                 values["max_arm_axis_offset_m"],
                 "max_arm_axis_offset_m",
             )
+            self._update_effective_workspace_limits()
         if "max_arm_target_delta_axis_m" in values:
             self.max_arm_target_delta_axis_m = self._positive_vector3_from_param(
                 values["max_arm_target_delta_axis_m"],
@@ -2925,16 +3002,18 @@ class RM65PalmFollower:
         if np.linalg.norm(arm_offset) < self.hand_deadband_m:
             arm_offset = np.zeros(3, dtype=np.float64)
         else:
-            arm_offset = self._limit_per_axis(
+            arm_offset = self._limit_per_axis_bounds(
                 arm_offset,
-                self.max_arm_axis_offset_m,
+                self.workspace_negative_axis_offset_m,
+                self.workspace_positive_axis_offset_m,
             )
         arm_offset = self._anti_drift_filter_offset(arm_offset)
         arm_offset = self._mit_filter_offset(arm_offset)
         arm_offset = self._quantize(arm_offset, self.arm_motion_unit_m)
-        arm_offset = self._limit_per_axis(
+        arm_offset = self._limit_per_axis_bounds(
             arm_offset,
-            self.max_arm_axis_offset_m,
+            self.workspace_negative_axis_offset_m,
+            self.workspace_positive_axis_offset_m,
         )
 
         target_pose = list(self.initial_pose)
@@ -3012,12 +3091,16 @@ class RM65PalmFollower:
                 self._recover_motion_state_locked("startup")
 
         if self.auto_home_on_start:
-            self._move_home_blocking("startup")
-
-        state_ret, state = self.robot.rm_get_current_arm_state()
-        if state_ret != 0:
-            raise RuntimeError(f"Failed to read current arm state, code={state_ret}")
-        self.initial_pose = [float(value) for value in state["pose"]]
+            home_ret = self._move_home_blocking("startup")
+            if home_ret != 0:
+                raise RuntimeError(
+                    "Failed to reach safe home and establish the startup IK "
+                    f"workspace, code={home_ret}"
+                )
+        elif not self._refresh_initial_pose_from_current_state("startup"):
+            raise RuntimeError(
+                "Failed to establish a safe startup TCP reference and IK workspace"
+            )
         self.last_target_pose = list(self.initial_pose)
         self.last_commanded_pose = list(self.initial_pose)
         self.logger.info(f"Initial TCP pose: {self.initial_pose}")
@@ -3276,9 +3359,10 @@ class RM65PalmFollower:
             self.arm_axis_max_velocity_m_s,
         )
         self.mit_position_offset += self.mit_velocity_offset * dt
-        self.mit_position_offset = self._limit_per_axis(
+        self.mit_position_offset = self._limit_per_axis_bounds(
             self.mit_position_offset,
-            self.max_arm_axis_offset_m,
+            self.workspace_negative_axis_offset_m,
+            self.workspace_positive_axis_offset_m,
         )
 
         if (
@@ -3388,7 +3472,14 @@ class RM65PalmFollower:
                         f"RM65-B returned to safe home ({reason}): {self.safe_home_joints}"
                     )
                     self.motion_stage = f"refresh_state:{reason}"
-                    self._refresh_initial_pose_from_current_state()
+                    if not self._refresh_initial_pose_from_current_state(
+                        f"home:{reason}"
+                    ):
+                        self.logger.error(
+                            "RM65-B reached home, but refreshing the TCP reference "
+                            "or six-direction IK workspace scan failed"
+                        )
+                        ret = -1003
                     self.last_arm_offset = np.zeros(3, dtype=np.float64)
                     self.last_target_pose = (
                         list(self.initial_pose) if self.initial_pose else None
@@ -3432,13 +3523,276 @@ class RM65PalmFollower:
         )
         return False
 
-    def _refresh_initial_pose_from_current_state(self):
-        state_ret, state = self.robot.rm_get_current_arm_state()
+    def _refresh_initial_pose_from_current_state(self, reason="reference_reset"):
+        state_ret, state = self._read_current_arm_state_with_retry(reason)
         if state_ret != 0:
-            self.logger.warn(f"Failed to refresh initial TCP pose, code={state_ret}")
-            return
+            self.logger.error(
+                f"Failed to refresh initial TCP pose ({reason}), code={state_ret}"
+            )
+            return False
         self.initial_pose = [float(value) for value in state["pose"]]
         self.logger.info(f"Updated hand-control TCP reference pose: {self.initial_pose}")
+        return self._scan_workspace_from_state(state, reason)
+
+    def _read_current_arm_state_with_retry(self, reason):
+        last_ret = -1
+        last_state = {}
+        for attempt in range(1, self.arm_state_read_retries + 1):
+            try:
+                last_ret, last_state = self.robot.rm_get_current_arm_state()
+            except Exception as exc:
+                last_ret, last_state = -1, {}
+                self.logger.warn(
+                    "RM65-B current-state read raised an exception "
+                    f"({reason}, attempt {attempt}/{self.arm_state_read_retries}): {exc}"
+                )
+            if last_ret == 0:
+                return last_ret, last_state
+            if attempt < self.arm_state_read_retries:
+                self.logger.warn(
+                    "RM65-B current-state read failed "
+                    f"({reason}, attempt {attempt}/{self.arm_state_read_retries}, "
+                    f"code={last_ret}); retrying"
+                )
+                if self.arm_state_read_retry_interval_s > 0.0:
+                    time.sleep(self.arm_state_read_retry_interval_s)
+        return last_ret, last_state
+
+    def _scan_workspace_from_state(self, state, reason):
+        base_pose = [float(value) for value in state.get("pose", [])]
+        base_joints = [float(value) for value in state.get("joint", [])]
+        if len(base_pose) < 6 or len(base_joints) < self.arm_dof:
+            self._fail_closed_workspace_limits()
+            self.logger.error(
+                "Cannot run the six-direction IK workspace scan because the "
+                f"current state is incomplete ({reason}): pose={len(base_pose)}, "
+                f"joints={len(base_joints)}"
+            )
+            return False
+
+        if not self.workspace_scan_enabled:
+            self.workspace_scanned_negative_axis_offset_m = np.full(
+                3, np.inf, dtype=np.float64
+            )
+            self.workspace_scanned_positive_axis_offset_m = np.full(
+                3, np.inf, dtype=np.float64
+            )
+            self.workspace_scan_reference_pose = list(base_pose)
+            self._update_effective_workspace_limits()
+            self.logger.warn(
+                "Six-direction IK workspace scan is disabled; using only the "
+                f"configured XYZ limits {self.max_arm_axis_offset_m.tolist()}m"
+            )
+            return True
+
+        base_joints = base_joints[: self.arm_dof]
+        if not self._joints_within_limits(base_joints, "workspace_scan_current_joints"):
+            self._fail_closed_workspace_limits()
+            return False
+        if not self._joints_away_from_singularity(
+            base_joints, "workspace_scan_current_joints"
+        ):
+            self._fail_closed_workspace_limits()
+            return False
+
+        try:
+            current_limit_check = self.robot.rm_algo_ikine_check_joint_position_limit(
+                self._pad_joints_for_sdk(base_joints)
+            )
+        except Exception as exc:
+            self._fail_closed_workspace_limits()
+            self.logger.error(
+                "Cannot run the six-direction IK workspace scan because the SDK "
+                f"joint-limit helper failed: {exc}"
+            )
+            return False
+        if current_limit_check != 0:
+            self._fail_closed_workspace_limits()
+            self.logger.error(
+                "Cannot run the six-direction IK workspace scan because the "
+                "current joints failed the SDK position-limit check: "
+                f"{current_limit_check}"
+            )
+            return False
+
+        raw_negative = np.zeros(3, dtype=np.float64)
+        raw_positive = np.zeros(3, dtype=np.float64)
+        boundary_reasons = []
+        axis_names = ("X", "Y", "Z")
+        self.logger.info(
+            "Starting non-moving six-direction IK workspace scan "
+            f"({reason}); pose={base_pose}, step={self.workspace_scan_step_m:.4f}m"
+        )
+        for axis_index, axis_name in enumerate(axis_names):
+            raw_negative[axis_index], negative_reason = self._scan_axis_direction(
+                base_pose,
+                base_joints,
+                axis_index,
+                -1.0,
+            )
+            raw_positive[axis_index], positive_reason = self._scan_axis_direction(
+                base_pose,
+                base_joints,
+                axis_index,
+                1.0,
+            )
+            boundary_reasons.extend(
+                (f"-{axis_name}:{negative_reason}", f"+{axis_name}:{positive_reason}")
+            )
+            self.logger.info(
+                f"IK workspace scan {axis_name}: "
+                f"-{axis_name}={raw_negative[axis_index]:.5f}m "
+                f"({negative_reason}), "
+                f"+{axis_name}={raw_positive[axis_index]:.5f}m "
+                f"({positive_reason})"
+            )
+
+        self.workspace_scanned_negative_axis_offset_m = (
+            raw_negative * self.workspace_scan_safety_ratio
+        )
+        self.workspace_scanned_positive_axis_offset_m = (
+            raw_positive * self.workspace_scan_safety_ratio
+        )
+        self.workspace_scan_reference_pose = list(base_pose)
+        self._update_effective_workspace_limits()
+
+        effective = np.concatenate(
+            (
+                self.workspace_negative_axis_offset_m,
+                self.workspace_positive_axis_offset_m,
+            )
+        )
+        if np.any(effective < self.workspace_scan_min_effective_m):
+            failed_negative = self.workspace_negative_axis_offset_m.copy()
+            failed_positive = self.workspace_positive_axis_offset_m.copy()
+            self._fail_closed_workspace_limits()
+            self.logger.error(
+                "Six-direction IK workspace scan refused tracking because an "
+                "effective direction is smaller than "
+                f"{self.workspace_scan_min_effective_m:.4f}m: "
+                f"negative={failed_negative.tolist()}m, "
+                f"positive={failed_positive.tolist()}m"
+            )
+            return False
+
+        self.logger.info(
+            "Six-direction IK workspace scan complete: "
+            f"raw_negative={raw_negative.round(5).tolist()}m, "
+            f"raw_positive={raw_positive.round(5).tolist()}m, "
+            f"safety_ratio={self.workspace_scan_safety_ratio:.2f}, "
+            f"effective_negative={self.workspace_negative_axis_offset_m.round(5).tolist()}m, "
+            f"effective_positive={self.workspace_positive_axis_offset_m.round(5).tolist()}m, "
+            f"boundaries={boundary_reasons}"
+        )
+        return True
+
+    def _scan_axis_direction(
+        self,
+        base_pose,
+        base_joints,
+        axis_index,
+        direction,
+    ):
+        maximum = float(self.workspace_scan_max_distance_m[axis_index])
+        step = min(float(self.workspace_scan_step_m), maximum)
+        last_safe_distance = 0.0
+        last_safe_joints = list(base_joints)
+        first_unsafe_distance = None
+        boundary_reason = "scan_cap"
+        probe_distance = step
+
+        while probe_distance <= maximum + 1e-12:
+            target_pose = list(base_pose)
+            target_pose[axis_index] += float(direction) * probe_distance
+            safe, solved_joints, failure_reason = self._workspace_pose_solution(
+                target_pose,
+                last_safe_joints,
+            )
+            if not safe:
+                first_unsafe_distance = probe_distance
+                boundary_reason = failure_reason
+                break
+            last_safe_distance = probe_distance
+            last_safe_joints = solved_joints
+            if maximum - probe_distance <= 1e-12:
+                return maximum, boundary_reason
+            probe_distance = min(maximum, probe_distance + step)
+
+        if first_unsafe_distance is None:
+            return last_safe_distance, boundary_reason
+
+        lower = last_safe_distance
+        upper = first_unsafe_distance
+        for _ in range(self.workspace_scan_refine_iterations):
+            middle = 0.5 * (lower + upper)
+            target_pose = list(base_pose)
+            target_pose[axis_index] += float(direction) * middle
+            safe, solved_joints, failure_reason = self._workspace_pose_solution(
+                target_pose,
+                last_safe_joints,
+            )
+            if safe:
+                lower = middle
+                last_safe_joints = solved_joints
+            else:
+                upper = middle
+                boundary_reason = failure_reason
+        return lower, boundary_reason
+
+    def _workspace_pose_solution(self, pose, seed_joints):
+        try:
+            params = rm_inverse_kinematics_params_t(
+                q_in=self._pad_joints_for_sdk(seed_joints),
+                q_pose=pose,
+                flag=1,
+            )
+            ik_ret, target_joints = self.robot.rm_algo_inverse_kinematics(params)
+        except Exception as exc:
+            return False, list(seed_joints), f"ik_exception:{exc}"
+        if ik_ret != 0:
+            return False, list(seed_joints), f"ik_code:{ik_ret}"
+
+        target_joints = [float(value) for value in target_joints[: self.arm_dof]]
+        if len(target_joints) < self.arm_dof:
+            return False, list(seed_joints), "incomplete_ik_solution"
+        if not self._joints_within_limits(
+            target_joints,
+            "workspace_scan_ik_joints",
+            log_failure=False,
+        ):
+            return False, list(seed_joints), "joint_margin"
+        if not self._joints_away_from_singularity(
+            target_joints,
+            "workspace_scan_ik_joints",
+            log_failure=False,
+        ):
+            return False, list(seed_joints), "wrist_singularity"
+        try:
+            limit_check = self.robot.rm_algo_ikine_check_joint_position_limit(
+                self._pad_joints_for_sdk(target_joints)
+            )
+        except Exception as exc:
+            return False, list(seed_joints), f"sdk_limit_exception:{exc}"
+        if limit_check != 0:
+            return False, list(seed_joints), f"sdk_joint_limit:{limit_check}"
+        return True, target_joints, "safe"
+
+    def _update_effective_workspace_limits(self):
+        self.workspace_negative_axis_offset_m = np.minimum(
+            self.max_arm_axis_offset_m,
+            self.workspace_scanned_negative_axis_offset_m,
+        )
+        self.workspace_positive_axis_offset_m = np.minimum(
+            self.max_arm_axis_offset_m,
+            self.workspace_scanned_positive_axis_offset_m,
+        )
+
+    def _fail_closed_workspace_limits(self):
+        self.workspace_scanned_negative_axis_offset_m = np.zeros(3, dtype=np.float64)
+        self.workspace_scanned_positive_axis_offset_m = np.zeros(3, dtype=np.float64)
+        self.workspace_negative_axis_offset_m = np.zeros(3, dtype=np.float64)
+        self.workspace_positive_axis_offset_m = np.zeros(3, dtype=np.float64)
+        self.workspace_scan_reference_pose = None
 
     def _load_joint_limits(self):
         if not self.joint_safety_enabled:
@@ -3584,7 +3938,7 @@ class RM65PalmFollower:
             self.logger.debug(f"SDK IK joint-limit helper unavailable: {exc}")
         return True
 
-    def _joints_away_from_singularity(self, joints, label):
+    def _joints_away_from_singularity(self, joints, label, log_failure=True):
         if not self.singularity_safety_enabled:
             return True
         if self.arm_dof < 5 or len(joints) < 5:
@@ -3592,10 +3946,11 @@ class RM65PalmFollower:
         j5 = float(joints[4])
         min_abs = max(0.0, float(self.wrist_singularity_joint5_min_abs_deg))
         if abs(j5) < min_abs:
-            self.logger.warn(
-                f"{label}[5]={j5:.3f} deg is too close to the RM65 wrist "
-                f"singularity; require |J5| >= {min_abs:.3f} deg"
-            )
+            if log_failure:
+                self.logger.warn(
+                    f"{label}[5]={j5:.3f} deg is too close to the RM65 wrist "
+                    f"singularity; require |J5| >= {min_abs:.3f} deg"
+                )
             return False
         return True
 
@@ -3609,11 +3964,12 @@ class RM65PalmFollower:
             0.5,
         )
 
-    def _joints_within_limits(self, joints, label):
+    def _joints_within_limits(self, joints, label, log_failure=True):
         if not self.joint_safety_enabled:
             return True
         if self.joint_min_limits is None or self.joint_max_limits is None:
-            self.logger.error("Joint limits are unavailable; refusing motion")
+            if log_failure:
+                self.logger.error("Joint limits are unavailable; refusing motion")
             return False
 
         values = [float(value) for value in joints[: self.arm_dof]]
@@ -3621,10 +3977,11 @@ class RM65PalmFollower:
             lower = self.joint_min_limits[index] + self.joint_limit_margin_deg
             upper = self.joint_max_limits[index] - self.joint_limit_margin_deg
             if value < lower or value > upper:
-                self.logger.warn(
-                    f"{label}[{index + 1}]={value:.3f} deg exceeds safe range "
-                    f"[{lower:.3f}, {upper:.3f}] deg"
-                )
+                if log_failure:
+                    self.logger.warn(
+                        f"{label}[{index + 1}]={value:.3f} deg exceeds safe range "
+                        f"[{lower:.3f}, {upper:.3f}] deg"
+                    )
                 return False
         return True
 
@@ -3710,6 +4067,13 @@ class RM65PalmFollower:
         vector = np.asarray(vector, dtype=np.float64)
         max_abs_values = np.asarray(max_abs_values, dtype=np.float64)
         return np.clip(vector, -max_abs_values, max_abs_values)
+
+    @staticmethod
+    def _limit_per_axis_bounds(vector, negative_limits, positive_limits):
+        vector = np.asarray(vector, dtype=np.float64)
+        negative_limits = np.asarray(negative_limits, dtype=np.float64)
+        positive_limits = np.asarray(positive_limits, dtype=np.float64)
+        return np.minimum(np.maximum(vector, -negative_limits), positive_limits)
 
     @staticmethod
     def _quantize(vector, unit):
