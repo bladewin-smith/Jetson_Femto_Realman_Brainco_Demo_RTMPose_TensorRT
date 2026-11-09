@@ -1,3 +1,5 @@
+[飞书教程文档](https://xcnogtoniyj5.feishu.cn/wiki/MQmZw5UKdi2936kbwv9chJ9GnNM?from=from_copylink)
+
 # RTMDet + RTMPose + 专用手部模型机械臂控制
 
 这是从原项目独立复制并优化的仓库。当前生产视觉链已经切换为原生
