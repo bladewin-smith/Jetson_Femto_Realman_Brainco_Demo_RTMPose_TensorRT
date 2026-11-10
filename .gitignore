@@ -16,3 +16,12 @@ models/mmdeploy/*/
 # ONNX models managed by Git LFS
 !models/onnx/
 !models/onnx/*.onnx
+
+
+# TensorRT engines are device and TensorRT-version specific
+models/**/*.engine
+
+# Old or generated deployment outputs
+models/mmdeploy/**
+models/tensorrt/**
+models/tensorrt_native/**
