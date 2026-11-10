@@ -12,3 +12,7 @@ models/mmdeploy/*/
 *.onnx
 *.pth
 *.pt
+
+# ONNX models managed by Git LFS
+!models/onnx/
+!models/onnx/*.onnx
